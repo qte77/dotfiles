@@ -1,9 +1,0 @@
-{
-  "editor.lineNumbers": "on",
-  "editor.wordWrap": "on",
-  "explorer.confirmDelete": true,
-  "files.autoSave": "onFocusChange",
-  "git.autofetch": true,
-  "git.enableSmartCommit": true,
-  "redhat.telemetry.enabled": false
-}
