@@ -6,16 +6,20 @@ set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# VS Code keybindings & user settings
-mkdir -p ~/.config/Code/User
-ln -sf "$DOTFILES_DIR/.config/Code/User/keybindings.json" ~/.config/Code/User/keybindings.json
-ln -sf "$DOTFILES_DIR/.config/Code/User/settings.json" ~/.config/Code/User/settings.json
+# Declarative: source (relative to repo) -> target (absolute)
+declare -A LINKS=(
+  [".editorconfig"]="$HOME/.editorconfig"
+  [".gitmessage"]="$HOME/.gitmessage"
+  [".config/Code/User/settings.json"]="$HOME/.config/Code/User/settings.json"
+  [".config/Code/User/keybindings.json"]="$HOME/.config/Code/User/keybindings.json"
+)
 
-# EditorConfig
-ln -sf "$DOTFILES_DIR/.editorconfig" ~/.editorconfig
+for src in "${!LINKS[@]}"; do
+  target="${LINKS[$src]}"
+  mkdir -p "$(dirname "$target")"
+  ln -sf "$DOTFILES_DIR/$src" "$target"
+done
 
-# Git commit template
-ln -sf "$DOTFILES_DIR/.gitmessage" ~/.gitmessage
 git config --global commit.template ~/.gitmessage
 
 echo "Dotfiles installed from $DOTFILES_DIR"
