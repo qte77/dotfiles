@@ -12,6 +12,8 @@ declare -A LINKS=(
   [".gitmessage"]="$HOME/.gitmessage"
   [".config/Code/User/settings.json"]="$HOME/.config/Code/User/settings.json"
   [".config/Code/User/keybindings.json"]="$HOME/.config/Code/User/keybindings.json"
+  [".config/rtk/config.toml"]="$HOME/.config/rtk/config.toml"
+  [".claude/settings.json"]="$HOME/.claude/settings.json"
 )
 
 for src in "${!LINKS[@]}"; do
@@ -19,6 +21,9 @@ for src in "${!LINKS[@]}"; do
   mkdir -p "$(dirname "$target")"
   ln -sf "$DOTFILES_DIR/$src" "$target"
 done
+
+# Copy (not symlink) — WakaTime extension writes to this file directly
+cp -n "$DOTFILES_DIR/.wakatime.cfg" "$HOME/.wakatime.cfg" 2>/dev/null || true
 
 git config --global commit.template ~/.gitmessage
 
