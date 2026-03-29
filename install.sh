@@ -14,6 +14,7 @@ declare -A LINKS=(
   [".config/Code/User/keybindings.json"]="$HOME/.config/Code/User/keybindings.json"
   [".config/rtk/config.toml"]="$HOME/.config/rtk/config.toml"
   [".claude/settings.json"]="$HOME/.claude/settings.json"
+  [".claude/.claude.json"]="$HOME/.claude/.claude.json"
 )
 
 for src in "${!LINKS[@]}"; do
