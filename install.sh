@@ -8,8 +8,8 @@ DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Declarative: source (relative to repo) -> target (absolute)
 declare -A LINKS=(
-  [".editorconfig"]="$HOME/.editorconfig"
-  [".gitmessage"]="$HOME/.gitmessage"
+  [".config/editorconfig"]="$HOME/.editorconfig"
+  [".config/gitmessage"]="$HOME/.gitmessage"
   [".config/Code/User/settings.json"]="$HOME/.config/Code/User/settings.json"
   [".config/Code/User/keybindings.json"]="$HOME/.config/Code/User/keybindings.json"
   [".config/rtk/config.toml"]="$HOME/.config/rtk/config.toml"
@@ -24,7 +24,7 @@ for src in "${!LINKS[@]}"; do
 done
 
 # Copy (not symlink) — WakaTime extension writes to this file directly
-cp -n "$DOTFILES_DIR/.wakatime.cfg" "$HOME/.wakatime.cfg" 2>/dev/null || true
+cp -n "$DOTFILES_DIR/.config/wakatime.cfg" "$HOME/.wakatime.cfg" 2>/dev/null || true
 
 git config --global commit.template ~/.gitmessage
 

@@ -11,9 +11,9 @@ Dev environment configs for Codespaces and devcontainers.
 | `.config/Code/User/settings.json` | VS Code user settings | symlink |
 | `.config/Code/User/keybindings.json` | VS Code keybindings | symlink |
 | `.config/rtk/config.toml` | RTK CLI config | symlink |
-| `.editorconfig` | `~/.editorconfig` | symlink |
-| `.gitmessage` | `~/.gitmessage` | symlink |
-| `.wakatime.cfg` | `~/.wakatime.cfg` | copy (extension mutates it) |
+| `.config/editorconfig` | `~/.editorconfig` | symlink |
+| `.config/gitmessage` | `~/.gitmessage` | symlink |
+| `.config/wakatime.cfg` | `~/.wakatime.cfg` | copy (extension mutates it) |
 
 ## Setup
 
