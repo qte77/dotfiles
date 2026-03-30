@@ -33,15 +33,16 @@ if [[ "${CODESPACES:-}" == "true" ]]; then
   # Preserve any existing ~/.claude content (e.g. from Claude Code init)
   if [[ -d "$HOME/.claude" && ! -L "$HOME/.claude" ]]; then
     cp -rn "$HOME/.claude/." /workspaces/.claude-files/
+    mv "$HOME/.claude" /workspaces/.claude-files/.claude.bak
   fi
   # Layer dotfiles defaults (no-clobber: won't overwrite runtime files)
   cp -rn "$DOTFILES_DIR/.claude/." /workspaces/.claude-files/
-  rm -rf "$HOME/.claude" 2>/dev/null
   ln -sf /workspaces/.claude-files "$HOME/.claude"
 else
   mkdir -p "$HOME/.claude"
   ln -sf "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json"
   ln -sf "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
+  ln -sf "$DOTFILES_DIR/.claude/hooks" "$HOME/.claude/hooks"
 fi
 
 # Copy (not symlink) — WakaTime extension writes to this file directly
