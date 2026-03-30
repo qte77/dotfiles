@@ -6,14 +6,23 @@ Dev environment configs for Codespaces and devcontainers.
 
 | File | Target | Method |
 |------|--------|--------|
-| `.claude/.claude.json` | `~/.claude/.claude.json` | symlink |
-| `.claude/settings.json` | `~/.claude/settings.json` | symlink |
+| `.claude/` | `~/.claude/` | Codespace: copy to `/workspaces/.claude-files/`, symlink `~/.claude` → there. Otherwise: symlink individual files. |
 | `.config/Code/User/settings.json` | VS Code user settings | symlink |
 | `.config/Code/User/keybindings.json` | VS Code keybindings | symlink |
 | `.config/rtk/config.toml` | RTK CLI config | symlink |
 | `.config/editorconfig` | `~/.editorconfig` | symlink |
 | `.config/gitmessage` | `~/.gitmessage` | symlink |
 | `.config/wakatime.cfg` | `~/.wakatime.cfg` | copy (extension mutates it) |
+
+### Claude Code in Codespaces
+
+`~/.claude` is symlinked to `/workspaces/.claude-files/` for rebuild persistence. On install, existing content is merged with no-clobber priority:
+
+1. **Existing `.claude-files/`** — preserved (previous rebuild state)
+2. **`~/.claude/` real dir** — merged in (Claude Code may have initialized first)
+3. **Dotfiles defaults** — layered last, never overwrites runtime files
+
+This means Claude Code can run before or after dotfiles — credentials, sessions, and hooks are preserved either way.
 
 ## Setup
 
