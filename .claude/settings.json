@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/vscode/.claude/hooks/rtk-rewrite.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "attribution": {
+    "commit": "Co-Authored-By: Claude <noreply@anthropic.com>",
+    "pr": "Generated with Claude <noreply@anthropic.com>"
+  },
+  "enabledPlugins": {
+    "cc-meta@qte77-claude-code-utils": true,
+    "commit-helper@qte77-claude-code-utils": true,
+    "docs-governance@qte77-claude-code-utils": true,
+    "codebase-tools@qte77-claude-code-utils": true,
+    "workspace-sandbox@qte77-claude-code-utils": true
+  }
+}
