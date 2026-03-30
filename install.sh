@@ -13,8 +13,6 @@ declare -A LINKS=(
   [".config/Code/User/settings.json"]="$HOME/.config/Code/User/settings.json"
   [".config/Code/User/keybindings.json"]="$HOME/.config/Code/User/keybindings.json"
   [".config/rtk/config.toml"]="$HOME/.config/rtk/config.toml"
-  [".claude/settings.json"]="$HOME/.claude/settings.json"
-  [".claude/.claude.json"]="$HOME/.claude/.claude.json"
 )
 
 for src in "${!LINKS[@]}"; do
@@ -22,6 +20,29 @@ for src in "${!LINKS[@]}"; do
   mkdir -p "$(dirname "$target")"
   ln -sf "$DOTFILES_DIR/$src" "$target"
 done
+
+# Claude Code config — Codespace-aware persistence
+# In Codespaces: /workspaces/ survives rebuilds, so persist ~/.claude there
+# Outside: symlink individual config files from dotfiles
+#
+# Order safety: if Claude Code ran first and created a real ~/.claude dir,
+# merge its contents into .claude-files before replacing with a symlink.
+# cp -rn = no-clobber, so existing .claude-files content wins on conflict.
+if [[ "${CODESPACES:-}" == "true" ]]; then
+  mkdir -p /workspaces/.claude-files
+  # Preserve any existing ~/.claude content (e.g. from Claude Code init)
+  if [[ -d "$HOME/.claude" && ! -L "$HOME/.claude" ]]; then
+    cp -rn "$HOME/.claude/." /workspaces/.claude-files/
+  fi
+  # Layer dotfiles defaults (no-clobber: won't overwrite runtime files)
+  cp -rn "$DOTFILES_DIR/.claude/." /workspaces/.claude-files/
+  rm -rf "$HOME/.claude" 2>/dev/null
+  ln -sf /workspaces/.claude-files "$HOME/.claude"
+else
+  mkdir -p "$HOME/.claude"
+  ln -sf "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json"
+  ln -sf "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
+fi
 
 # Copy (not symlink) — WakaTime extension writes to this file directly
 cp -n "$DOTFILES_DIR/.config/wakatime.cfg" "$HOME/.wakatime.cfg" 2>/dev/null || true
