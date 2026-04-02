@@ -43,6 +43,7 @@ else
   ln -sf "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json"
   ln -sf "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
   ln -sf "$DOTFILES_DIR/.claude/hooks" "$HOME/.claude/hooks"
+  ln -sf "$DOTFILES_DIR/.claude/scripts" "$HOME/.claude/scripts"
 fi
 
 # Copy (not symlink) — WakaTime extension writes to this file directly
