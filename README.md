@@ -24,6 +24,26 @@ Dev environment configs for Codespaces and devcontainers.
 
 This means Claude Code can run before or after dotfiles — credentials, sessions, and hooks are preserved either way.
 
+### Project scaffolding
+
+These files are not deployed to `~/` — they exist as templates for copying into new projects (manually or via CC workspace plugins):
+
+| File | Purpose |
+|------|---------|
+| `.gitmessage` | Conventional commits template (`git config commit.template`) |
+| `.github/ISSUE_TEMPLATE/` | Bug report, question, feature request |
+| `.github/PULL_REQUEST_TEMPLATE.md` | PR checklist with conventional commit types |
+| `CONTRIBUTING.md` | Generic dev workflow and code standards |
+| `CHANGELOG.md` | Keep a Changelog scaffold |
+
+Agent governance files (`AGENTS.md`, `AGENT_LEARNINGS.md`, `AGENT_REQUESTS.md`) are **not** managed here — they belong in the [CC utils plugin](https://github.com/qte77/claude-code-utils-plugin) repo and are deployed by its workspace plugins.
+
+### Codespaces dotfiles behavior
+
+Per [GitHub docs](https://docs.github.com/codespaces/setting-your-user-preferences/personalizing-github-codespaces-for-your-account#dotfiles): Codespaces clones the configured dotfiles repo and auto-detects `install.sh` (highest priority). If no install script is found, files starting with `.` are symlinked to `~/` automatically. Since this repo has `install.sh`, the fallback never triggers — all deployment is explicit.
+
+Changes only apply to **new** codespaces, not existing ones.
+
 ## Setup
 
 **Codespaces** — [Settings > Codespaces > Dotfiles](https://github.com/settings/codespaces): set repo to `qte77/dotfiles`.
