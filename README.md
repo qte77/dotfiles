@@ -36,7 +36,7 @@ These files are not deployed to `~/` — they exist as templates for copying int
 | `CONTRIBUTING.md` | Generic dev workflow and code standards |
 | `CHANGELOG.md` | Keep a Changelog scaffold |
 
-Agent governance files (`AGENTS.md`, `AGENT_LEARNINGS.md`, `AGENT_REQUESTS.md`) are **not** managed here — they belong in the [CC utils plugin](https://github.com/qte77/claude-code-utils-plugin) repo and are deployed by its workspace plugins.
+Agent governance files (`AGENTS.md`, `AGENT_LEARNINGS.md`, `AGENT_REQUESTS.md`) are **not** managed here — they belong in the [CC plugins](https://github.com/qte77/claude-code-plugins) repo and are deployed by its workspace plugins.
 
 ### Codespaces dotfiles behavior
 
