@@ -17,10 +17,10 @@
     "pr": "Generated with Claude <noreply@anthropic.com>"
   },
   "enabledPlugins": {
-    "cc-meta@qte77-claude-code-plugins": true,
-    "commit-helper@qte77-claude-code-plugins": true,
-    "docs-governance@qte77-claude-code-plugins": true,
-    "codebase-tools@qte77-claude-code-plugins": true,
-    "workspace-sandbox@qte77-claude-code-plugins": true
+    "cc-meta@qte77-claude-code-utils": true,
+    "commit-helper@qte77-claude-code-utils": true,
+    "docs-governance@qte77-claude-code-utils": true,
+    "codebase-tools@qte77-claude-code-utils": true,
+    "workspace-sandbox@qte77-claude-code-utils": true
   }
 }
