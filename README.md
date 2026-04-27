@@ -54,7 +54,7 @@ Changes only apply to **new** codespaces, not existing ones.
 "dotfiles.repository": "qte77/dotfiles",
 "dotfiles.installCommand": "install.sh",
 "dotfiles.targetPath": "~/dotfiles"
-```
+```bash
 
 **Manual** — `git clone https://github.com/qte77/dotfiles ~/dotfiles && ~/dotfiles/install.sh`
 

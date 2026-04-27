@@ -14,7 +14,7 @@ Development workflows, coding standards, and collaboration guidelines.
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/) format:
 
-```
+```text
 type[(scope)][!]: description
 ```
 
