@@ -14,7 +14,7 @@ Development workflows, coding standards, and collaboration guidelines.
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/) format:
 
-```
+```text
 type[(scope)][!]: description
 ```
 
@@ -46,7 +46,6 @@ type[(scope)][!]: description
 
 ## Pull Requests
 
-- Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md)
 - Keep PRs focused — one concern per PR
 - Provide a clear summary of changes and testing performed
 
