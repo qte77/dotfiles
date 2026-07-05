@@ -37,12 +37,14 @@ if [[ "${CODESPACES:-}" == "true" ]]; then
   fi
   # Layer dotfiles defaults (no-clobber: won't overwrite runtime files)
   cp -rn "$DOTFILES_DIR/.claude/." /workspaces/.claude-files/
-  ln -sf /workspaces/.claude-files "$HOME/.claude"
+  # -n: don't dereference an existing ~/.claude dir-symlink — without it a
+  # re-run plants a self-referential .claude-files/.claude-files loop inside
+  ln -sfn /workspaces/.claude-files "$HOME/.claude"
 else
   mkdir -p "$HOME/.claude"
   ln -sf "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json"
   ln -sf "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
-  ln -sf "$DOTFILES_DIR/.claude/hooks" "$HOME/.claude/hooks"
+  ln -sfn "$DOTFILES_DIR/.claude/hooks" "$HOME/.claude/hooks"
 fi
 
 # Copy (not symlink) — WakaTime extension writes to this file directly
