@@ -42,8 +42,12 @@ if [[ "${CODESPACES:-}" == "true" ]]; then
   ln -sfn /workspaces/.claude-files "$HOME/.claude"
 else
   mkdir -p "$HOME/.claude"
-  ln -sf "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json"
-  ln -sf "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json"
+  # Copy (not symlink) — Claude Code rewrites these via temp+rename, which
+  # replaces a file symlink with a regular file and silently breaks the link
+  # on first write. Seed once as defaults; directories aren't affected by
+  # this failure mode, so hooks/ stays a symlink.
+  cp -n "$DOTFILES_DIR/.claude/.claude.json" "$HOME/.claude/.claude.json" 2>/dev/null || true
+  cp -n "$DOTFILES_DIR/.claude/settings.json" "$HOME/.claude/settings.json" 2>/dev/null || true
   ln -sfn "$DOTFILES_DIR/.claude/hooks" "$HOME/.claude/hooks"
 fi
 
