@@ -6,7 +6,7 @@ Dev environment configs for Codespaces and devcontainers.
 
 | File | Target | Method |
 |------|--------|--------|
-| `.claude/` | `~/.claude/` | Codespace: copy to `/workspaces/.claude-files/`, symlink `~/.claude` → there. Otherwise: symlink individual files. |
+| `.claude/` | `~/.claude/` | Codespace: copy to `/workspaces/.claude-files/`, symlink `~/.claude` → there. Otherwise: copy `.claude.json`/`settings.json` as defaults (no-clobber), symlink `hooks/`. |
 | `.config/Code/User/settings.json` | VS Code user settings | symlink |
 | `.config/Code/User/keybindings.json` | VS Code keybindings | symlink |
 | `.config/rtk/config.toml` | RTK CLI config | symlink |
@@ -23,6 +23,10 @@ Dev environment configs for Codespaces and devcontainers.
 3. **Dotfiles defaults** — layered last, never overwrites runtime files
 
 This means Claude Code can run before or after dotfiles — credentials, sessions, and hooks are preserved either way.
+
+### Claude Code outside Codespaces
+
+`.claude.json` and `settings.json` are seeded via no-clobber copy, not symlinked — Claude Code rewrites both via temp+rename, which replaces a file symlink with a regular file and silently breaks it on first write (see [qte77/claude-code-plugins#199](https://github.com/qte77/claude-code-plugins/issues/199) failure mode 1). `hooks/` stays a symlink since directories aren't affected by that failure mode.
 
 ### Project scaffolding
 
