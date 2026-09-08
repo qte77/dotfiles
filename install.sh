@@ -5,6 +5,7 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACES_DIR="${WORKSPACES_DIR:-/workspaces}"
 
 # Declarative: source (relative to repo) -> target (absolute)
 declare -A LINKS=(
@@ -55,5 +56,24 @@ fi
 cp -n "$DOTFILES_DIR/.config/wakatime.cfg" "$HOME/.wakatime.cfg" 2>/dev/null || true
 
 git config --global commit.template ~/.gitmessage
+
+# disk-cleanup.sh — /workspaces overlay relief tool. Symlinked (not copied) so
+# the tracked version in dotfiles is always the one that runs; source of truth
+# stays here, not on the ephemeral overlay.
+if [[ -d "$WORKSPACES_DIR" ]]; then
+  chmod +x "$DOTFILES_DIR/scripts/disk-cleanup.sh"
+  ln -sf "$DOTFILES_DIR/scripts/disk-cleanup.sh" "$WORKSPACES_DIR/disk-cleanup.sh"
+fi
+
+# Repair the offload symlinks disk-cleanup.sh plants (~/.cache/ms-playwright,
+# ~/.npm, etc. -> /tmp/devcache/...) on every new shell — /tmp is wiped when
+# the codespace stops, which otherwise leaves those dangling ("File exists" on
+# writes) until someone happens to notice and run `repair` by hand. Appended
+# idempotently so re-running install.sh never duplicates the line.
+REPAIR_HOOK='/workspaces/disk-cleanup.sh repair >/dev/null 2>&1 || true'
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+  [[ -f "$rc" ]] || continue
+  grep -qF "$REPAIR_HOOK" "$rc" 2>/dev/null || printf '\n# disk-cleanup: repair offload symlinks after /tmp wipe\n%s\n' "$REPAIR_HOOK" >> "$rc"
+done
 
 echo "Dotfiles installed from $DOTFILES_DIR"
