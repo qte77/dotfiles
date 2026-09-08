@@ -13,6 +13,7 @@ Dev environment configs for Codespaces and devcontainers.
 | `.config/editorconfig` | `~/.editorconfig` | symlink |
 | `.config/gitmessage` | `~/.gitmessage` | symlink |
 | `.config/wakatime.cfg` | `~/.wakatime.cfg` | copy (extension mutates it) |
+| `scripts/disk-cleanup.sh` | `/workspaces/disk-cleanup.sh` | symlink; also appends its `repair` hook to `~/.bashrc`/`~/.zshrc` (idempotent) |
 
 ### Claude Code in Codespaces
 
