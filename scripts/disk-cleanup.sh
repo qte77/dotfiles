@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# disk-cleanup.sh - disk relief for the /workspaces overlay, in two stages
+# disk-cleanup.sh - disk relief for a near-full dev-container disk, in two stages
 #
-# The overlay (/dev/loop4, 32G) backs both / and /workspaces, so freeing space
-# anywhere on it - including ~/.cache - relieves the same device.
+# In a typical codespace one overlay device backs both / and $WORKSPACES, so
+# freeing space anywhere on it - including ~/.cache - relieves the same device.
 #
 # STAGE 1: purge   deletes regenerable data. Idempotent, repeatable, leaves no
 #                  state behind. This is the emergency path - keep it fast.
@@ -36,25 +36,23 @@
 #
 # WHY THE ORIGINAL VERSION APPEARED TO HANG
 # -----------------------------------------
-# /workspaces is ext4 inside a loop file that sits near 100% full. Metadata
-# reads there run under 1 MB/s and block in uninterruptible (D) state, so the
-# process ignores Ctrl-C for seconds at a time. Measured on this box:
-#   one whole-tree `find`      = 3m03s wall / 2.4s CPU  (98% iowait)
-#   one `du -sh ~/.cache`      = 49s    wall / 0.6s CPU
-# The original multiplied that:
+# On a near-full loop-backed filesystem, metadata reads crawl and block in
+# uninterruptible (D) state, so the process ignores Ctrl-C for seconds at a
+# time. A single whole-tree `find` or `du` can take minutes of wall time while
+# using almost no CPU (nearly all iowait). The original multiplied that:
 #   * purge_path ran `du -sh` before every delete - a full walk to print a
 #     number, then a second full walk to unlink. Tier 1 (the DEFAULT) paid this
 #     on every cache path and emitted nothing for minutes.
-#   * Tier 3 ran seven separate whole-tree finds, one per artifact name (~21min).
-#   * find had no -xdev, so it also walked /workspaces/.codespaces/shared -
-#     a different device (/dev/root) holding the VS Code server, where deleting
-#     frees nothing on loop4.
-# Sizing is now opt-in, the seven traversals are one, the traversal stays
+#   * Tier 3 ran a separate whole-tree find per artifact name.
+#   * find had no -xdev, so it also walked $WORKSPACES/.codespaces - a mount on
+#     a different device (the VS Code server), where deleting frees nothing on
+#     the device being relieved.
+# Sizing is now opt-in, the per-name traversals are one, the traversal stays
 # on-device, and every phase prints an elapsed-time heartbeat.
 #
-# Git repos are found by globbing 1-3 levels deep (~30s) instead of a
-# whole-tree find (~3min); a 4th level cost 2min more and held no repo. That
-# is what lets git garbage sit in the default Tier 1. Tiers 3 and 4 still
+# Git repos are found by globbing 1-3 levels deep instead of a whole-tree
+# find - far faster, and repos rarely sit deeper. That is what lets git
+# garbage sit in the default Tier 1. Tiers 3 and 4 still
 # need the whole-tree scan, and share a single pass when both run.
 #
 # Usage:
@@ -64,7 +62,7 @@
 #   ./disk-cleanup.sh all              # purge, all tiers (venvs deleted)
 #   ./disk-cleanup.sh --defer 3        # rename into trash, rm in background
 #   ./disk-cleanup.sh --dry-run 2 3    # show what would go, delete nothing
-#   ./disk-cleanup.sh --sizes          # measure each path with du (SLOW here)
+#   ./disk-cleanup.sh --sizes          # measure each path with du (slow on a full disk)
 #
 #   ./disk-cleanup.sh git              # survey repos: pack / garbage / loose
 #   ./disk-cleanup.sh git --gc         # repack, keeping 2 weeks of unreachable
@@ -254,9 +252,12 @@ purge_path() {
   if (( DRY_RUN )); then
     printf '  [dry-run] would remove %-52s %s\n' "$p" "$sz"
   elif (( DEFER )) && trash_for "$p"; then
-    mv -- "$p" "$TRASH/$(basename -- "$p").$RANDOM" 2>/dev/null \
-      && printf '  queued  %-54s %s\n' "$p" "$sz" \
-      || { rm -rf -- "$p"; printf '  removed %-54s %s\n' "$p" "$sz"; }
+    if mv -- "$p" "$TRASH/$(basename -- "$p").$RANDOM" 2>/dev/null; then
+      printf '  queued  %-54s %s\n' "$p" "$sz"
+    else
+      rm -rf -- "$p"
+      printf '  removed %-54s %s\n' "$p" "$sz"
+    fi
   else
     rm -rf -- "$p"
     printf '  removed %-54s %s\n' "$p" "$sz"
@@ -289,10 +290,10 @@ purge_cmd() {
   esac
 }
 
-# Superseded Claude CLI binaries (~220M each): the updater's download staging
-# and every installed version except the current one. On 2026-09-23 these held
-# 1.2G while all Tier 1 caches together freed 0B. Only downloads/ is touched in
-# .claude-files - the rest is session history. A version some process is still
+# Superseded Claude CLI binaries (a few hundred MB each): the updater's
+# download staging and every installed version except the current one. They
+# can outweigh every other Tier 1 cache combined. Only downloads/ is touched
+# in .claude-files - the rest is session history. A version some process is still
 # running is skipped: its space would not free until that process exits.
 purge_old_claude() {
   local cur v
@@ -322,7 +323,11 @@ purge_old_claude() {
 #   * recent activity: the artifact itself or the repo's git index changed
 #     within ACTIVE_AGE_H (an install rewrites node_modules, a commit/stage the
 #     index)
+# in_use sets IN_USE_ROOT when the whole repo is busy (cwd or index), so the
+# caller can report it once instead of once per artifact; it stays empty when
+# only that one artifact was rebuilt recently.
 ACTIVE_CWDS=()
+IN_USE_ROOT=''
 collect_active() {
   local p c
   for p in /proc/[0-9]*; do
@@ -336,15 +341,16 @@ mtime() { stat -c %Y -- "$1" 2>/dev/null || printf 0; }
 
 in_use() {
   local p="$1" root idx c cutoff
+  IN_USE_ROOT=''
   cutoff=$(( $(date +%s) - ACTIVE_AGE_H * 3600 ))
   root=$(git -C "$(dirname -- "$p")" rev-parse --show-toplevel 2>/dev/null) \
     || root=$(dirname -- "$p")
   for c in ${ACTIVE_CWDS[@]+"${ACTIVE_CWDS[@]}"}; do
-    [[ "$c" == "$root" || "$c" == "$root"/* ]] && return 0
+    [[ "$c" == "$root" || "$c" == "$root"/* ]] && { IN_USE_ROOT="$root"; return 0; }
   done
-  (( $(mtime "$p") > cutoff )) && return 0
-  idx=$(git -C "$root" rev-parse --path-format=absolute --git-path index 2>/dev/null) || return 1
-  (( $(mtime "$idx") > cutoff ))
+  idx=$(git -C "$root" rev-parse --path-format=absolute --git-path index 2>/dev/null) \
+    && (( $(mtime "$idx") > cutoff )) && { IN_USE_ROOT="$root"; return 0; }
+  (( $(mtime "$p") > cutoff ))
 }
 
 # A running pnpm (often `node .../pnpm.cjs install`) may be linking from the
@@ -486,12 +492,14 @@ status_path() {
 }
 
 # ---- tier 3/4 traversal ----------------------------------------------------
-# One traversal for all artifact names instead of seven. -xdev keeps it on the
-# loop4 device, and .codespaces / .git / stale trash / worktrees are pruned outright:
-# .codespaces/shared is the VS Code server on another device, .git holds no build
-# artifacts but plenty of inodes to stat, and .claude/worktrees is other live
-# agent sessions' state - a worktree can appear or vanish between two runs of
-# this script, so its contents are never safe purge candidates.
+# One traversal for all artifact names instead of one each. -xdev keeps it on
+# the device being relieved, and .codespaces / .git / stale trash / worktrees / site-packages
+# are pruned outright: .codespaces/shared is the VS Code server on another
+# device, .git holds no build artifacts but plenty of inodes to stat, and
+# .claude/worktrees is other live agent sessions' state - a worktree can appear
+# or vanish between two runs of this script, so its contents are never safe
+# purge candidates. site-packages is the inside of a venv: one not named .venv
+# would otherwise have its __pycache__ dirs picked by Tier 3, which keeps venvs.
 ARTIFACT_NAMES=(node_modules .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache target .next .turbo)
 
 find_artifacts() {
@@ -500,7 +508,7 @@ find_artifacts() {
   name_expr=( "${name_expr[@]:1}" )   # drop the leading -o
   find "$WORKSPACES" -xdev \
     \( -path "${WORKSPACES}/.codespaces" -o -name .git -o -name '.disk-cleanup-trash.*' \
-       -o -path '*/.claude/worktrees' \) -prune -o \
+       -o -path '*/.claude/worktrees' -o -name site-packages \) -prune -o \
     -type d \( "${name_expr[@]}" \) -prune -print0 2>/dev/null
 }
 
@@ -510,7 +518,7 @@ ARTIFACTS_SCANNED=0
 scan_artifacts() {
   local dir
   (( ARTIFACTS_SCANNED )) && return 0
-  log "scanning ${WORKSPACES} for build artifacts (single pass, ~3min)"
+  log "scanning ${WORKSPACES} for build artifacts (single pass; slow on a full disk)"
   collect_active
   while IFS= read -r -d '' dir; do
     # Build-output names only count with the manifest that produces them beside
@@ -528,12 +536,18 @@ scan_artifacts() {
 # $1 = venv | other: purge the scanned artifacts of that kind
 purge_artifacts() {
   local dir kind
+  local -A kept=()
   for dir in ${ARTIFACTS[@]+"${ARTIFACTS[@]}"}; do
     kind=other
     [[ "$(basename -- "$dir")" == .venv ]] && kind=venv
     [[ "$kind" == "$1" ]] || continue
     if in_use "$dir"; then
-      printf '  keep    %-54s (active session)\n' "$dir"
+      if [[ -z "$IN_USE_ROOT" ]]; then
+        printf '  keep    %-54s (changed < %sh ago)\n' "$dir" "$ACTIVE_AGE_H"
+      elif [[ -z "${kept[$IN_USE_ROOT]:-}" ]]; then
+        printf '  keep    %-54s (active session, all artifacts)\n' "$IN_USE_ROOT/"
+        kept[$IN_USE_ROOT]=1
+      fi
       continue
     fi
     purge_path "$dir"
@@ -543,10 +557,11 @@ purge_artifacts() {
 
 # ---- git repositories ------------------------------------------------------
 # Repo bloat is invisible to the purge tiers: Tier 3 prunes .git outright (it
-# holds no build artifacts, only inodes to stat). Yet one repo here carried
-# 2.0G against a 105M real repository - bigger than every cache combined.
+# holds no build artifacts, only inodes to stat). Yet a repo's .git can grow to
+# many times its real size - bigger than every cache combined.
 #
-# That 2.0G was two different things, and they belong in different places:
+# That excess is usually two different things, and they belong in different
+# places:
 #
 #   abandoned tmp_pack_*   git's own `count-objects` calls this "garbage". It
 #                          is a half-written pack from a clone/fetch/gc that
@@ -699,7 +714,7 @@ purge)
   ;;
 
 git)
-  log "Scanning ${WORKSPACES} for git repositories (1-3 levels deep, ~30s)"
+  log "Scanning ${WORKSPACES} for git repositories (1-3 levels deep)"
   grepos=()
   while IFS= read -r -d '' g; do grepos+=( "$(dirname -- "$g")" ); done < <(find_git_repos)
   log "found ${#grepos[@]} repositories"
@@ -777,17 +792,23 @@ printf '\n'
 
 # ---- Summary --------------------------------------------------------------
 END_AVAIL=$(avail_bytes "$WORKSPACES")
+# Reason: with --defer the deletes only start as this script exits, so a
+# before/after df here measures concurrent writers, not this run - it can
+# even come out negative.
+PENDING=$(( DEFER && ${#TRASH_BY_DEV[@]} ))
 df -h "$WORKSPACES" | tail -1
 if (( DRY_RUN )); then
   log 'Dry run: nothing was changed.'
 elif [[ "$STAGE" == git ]] && (( ! GIT_GC )); then
   log 'Survey only: nothing was changed.'
+elif (( PENDING )); then
+  log 'Deletes are still running in the background; free space above is not final.'
+  log "Re-check in a few minutes: df -h ${WORKSPACES}"
 else
   freed=$(( END_AVAIL - START_AVAIL ))
   log "Reclaimed: $(human "$freed")"
-  if (( DEFER )); then log 'more will free as the background rm drains'; fi
 fi
-if (( END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
+if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
   log '  repo run/results data, Claude session histories (.claude-files/projects,'
   log '  ~/.claude-profiles), deleted files still held open by live sessions, and'
