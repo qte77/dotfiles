@@ -254,9 +254,12 @@ purge_path() {
   if (( DRY_RUN )); then
     printf '  [dry-run] would remove %-52s %s\n' "$p" "$sz"
   elif (( DEFER )) && trash_for "$p"; then
-    mv -- "$p" "$TRASH/$(basename -- "$p").$RANDOM" 2>/dev/null \
-      && printf '  queued  %-54s %s\n' "$p" "$sz" \
-      || { rm -rf -- "$p"; printf '  removed %-54s %s\n' "$p" "$sz"; }
+    if mv -- "$p" "$TRASH/$(basename -- "$p").$RANDOM" 2>/dev/null; then
+      printf '  queued  %-54s %s\n' "$p" "$sz"
+    else
+      rm -rf -- "$p"
+      printf '  removed %-54s %s\n' "$p" "$sz"
+    fi
   else
     rm -rf -- "$p"
     printf '  removed %-54s %s\n' "$p" "$sz"
@@ -322,7 +325,11 @@ purge_old_claude() {
 #   * recent activity: the artifact itself or the repo's git index changed
 #     within ACTIVE_AGE_H (an install rewrites node_modules, a commit/stage the
 #     index)
+# in_use sets IN_USE_ROOT when the whole repo is busy (cwd or index), so the
+# caller can report it once instead of once per artifact; it stays empty when
+# only that one artifact was rebuilt recently.
 ACTIVE_CWDS=()
+IN_USE_ROOT=''
 collect_active() {
   local p c
   for p in /proc/[0-9]*; do
@@ -336,15 +343,16 @@ mtime() { stat -c %Y -- "$1" 2>/dev/null || printf 0; }
 
 in_use() {
   local p="$1" root idx c cutoff
+  IN_USE_ROOT=''
   cutoff=$(( $(date +%s) - ACTIVE_AGE_H * 3600 ))
   root=$(git -C "$(dirname -- "$p")" rev-parse --show-toplevel 2>/dev/null) \
     || root=$(dirname -- "$p")
   for c in ${ACTIVE_CWDS[@]+"${ACTIVE_CWDS[@]}"}; do
-    [[ "$c" == "$root" || "$c" == "$root"/* ]] && return 0
+    [[ "$c" == "$root" || "$c" == "$root"/* ]] && { IN_USE_ROOT="$root"; return 0; }
   done
-  (( $(mtime "$p") > cutoff )) && return 0
-  idx=$(git -C "$root" rev-parse --path-format=absolute --git-path index 2>/dev/null) || return 1
-  (( $(mtime "$idx") > cutoff ))
+  idx=$(git -C "$root" rev-parse --path-format=absolute --git-path index 2>/dev/null) \
+    && (( $(mtime "$idx") > cutoff )) && { IN_USE_ROOT="$root"; return 0; }
+  (( $(mtime "$p") > cutoff ))
 }
 
 # A running pnpm (often `node .../pnpm.cjs install`) may be linking from the
@@ -487,11 +495,13 @@ status_path() {
 
 # ---- tier 3/4 traversal ----------------------------------------------------
 # One traversal for all artifact names instead of seven. -xdev keeps it on the
-# loop4 device, and .codespaces / .git / stale trash / worktrees are pruned outright:
-# .codespaces/shared is the VS Code server on another device, .git holds no build
-# artifacts but plenty of inodes to stat, and .claude/worktrees is other live
-# agent sessions' state - a worktree can appear or vanish between two runs of
-# this script, so its contents are never safe purge candidates.
+# loop4 device, and .codespaces / .git / stale trash / worktrees / site-packages
+# are pruned outright: .codespaces/shared is the VS Code server on another
+# device, .git holds no build artifacts but plenty of inodes to stat, and
+# .claude/worktrees is other live agent sessions' state - a worktree can appear
+# or vanish between two runs of this script, so its contents are never safe
+# purge candidates. site-packages is the inside of a venv: one not named .venv
+# would otherwise have its __pycache__ dirs picked by Tier 3, which keeps venvs.
 ARTIFACT_NAMES=(node_modules .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache target .next .turbo)
 
 find_artifacts() {
@@ -500,7 +510,7 @@ find_artifacts() {
   name_expr=( "${name_expr[@]:1}" )   # drop the leading -o
   find "$WORKSPACES" -xdev \
     \( -path "${WORKSPACES}/.codespaces" -o -name .git -o -name '.disk-cleanup-trash.*' \
-       -o -path '*/.claude/worktrees' \) -prune -o \
+       -o -path '*/.claude/worktrees' -o -name site-packages \) -prune -o \
     -type d \( "${name_expr[@]}" \) -prune -print0 2>/dev/null
 }
 
@@ -528,12 +538,18 @@ scan_artifacts() {
 # $1 = venv | other: purge the scanned artifacts of that kind
 purge_artifacts() {
   local dir kind
+  local -A kept=()
   for dir in ${ARTIFACTS[@]+"${ARTIFACTS[@]}"}; do
     kind=other
     [[ "$(basename -- "$dir")" == .venv ]] && kind=venv
     [[ "$kind" == "$1" ]] || continue
     if in_use "$dir"; then
-      printf '  keep    %-54s (active session)\n' "$dir"
+      if [[ -z "$IN_USE_ROOT" ]]; then
+        printf '  keep    %-54s (changed < %sh ago)\n' "$dir" "$ACTIVE_AGE_H"
+      elif [[ -z "${kept[$IN_USE_ROOT]:-}" ]]; then
+        printf '  keep    %-54s (active session, all artifacts)\n' "$IN_USE_ROOT/"
+        kept[$IN_USE_ROOT]=1
+      fi
       continue
     fi
     purge_path "$dir"
@@ -777,17 +793,23 @@ printf '\n'
 
 # ---- Summary --------------------------------------------------------------
 END_AVAIL=$(avail_bytes "$WORKSPACES")
+# Reason: with --defer the deletes only start as this script exits, so a
+# before/after df here measures concurrent writers, not this run - it can
+# even come out negative.
+PENDING=$(( DEFER && ${#TRASH_BY_DEV[@]} ))
 df -h "$WORKSPACES" | tail -1
 if (( DRY_RUN )); then
   log 'Dry run: nothing was changed.'
 elif [[ "$STAGE" == git ]] && (( ! GIT_GC )); then
   log 'Survey only: nothing was changed.'
+elif (( PENDING )); then
+  log 'Deletes are still running in the background; free space above is not final.'
+  log "Re-check in a few minutes: df -h ${WORKSPACES}"
 else
   freed=$(( END_AVAIL - START_AVAIL ))
   log "Reclaimed: $(human "$freed")"
-  if (( DEFER )); then log 'more will free as the background rm drains'; fi
 fi
-if (( END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
+if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
   log '  repo run/results data, Claude session histories (.claude-files/projects,'
   log '  ~/.claude-profiles), deleted files still held open by live sessions, and'
