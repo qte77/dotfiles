@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `scripts/disk-cleanup.sh --defer`: queued trees were never deleted — `trash_for` ran in a
   `$(...)` subshell, so the trash dir it registered was lost and `flush_trash` never removed it.
+- `scripts/disk-cleanup.sh --defer`: no longer prints a "Reclaimed" figure or the low-space hint
+  while background deletes are still pending — that before/after `df` measured concurrent writers,
+  not the run, and could come out negative. It now says to re-check `df` later.
+- `scripts/disk-cleanup.sh`: Tier 3 no longer descends into `site-packages`, so a venv not named
+  `.venv` keeps its `__pycache__` dirs (Tier 3 is "except venvs").
+- `scripts/disk-cleanup.sh`: a busy repo is reported once ("active session, all artifacts")
+  instead of one `keep` line per artifact; an artifact kept only for its own recent change says so.
 
 - `install.sh`: symlinks `scripts/disk-cleanup.sh` to `/workspaces/disk-cleanup.sh` (tracked copy
   is now the source of truth) and appends its `repair` hook to `~/.bashrc` / `~/.zshrc`
