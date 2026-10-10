@@ -15,12 +15,20 @@
 # are short of space; an offload is something you do once and then maintain.
 # Bundling them meant an urgent purge sat behind a slow cache copy.
 #
-#   purge tiers
-#     Tier 1 (default): regenerable caches. Zero risk.
-#     Tier 2 (opt-in):  tool data and downloaded models. Re-download cost.
-#     Tier 3 (opt-in):  build artifacts (.venv/node_modules/target/caches).
-#     Tier 4 (opt-in):  abandoned git pack files. Zero risk - git itself calls
-#                       them garbage. Needs a tree scan, so not in the fast path.
+#   purge tiers, ordered by risk - each adds to the ones below it
+#     Tier 1 (default): zero risk. Caches, `pnpm store prune`, superseded Claude
+#                       CLI binaries, and abandoned git pack files (git itself
+#                       calls them garbage).
+#     Tier 2 (opt-in):  re-download cost only; nothing breaks. Tool data,
+#                       downloaded models, a pnpm store no longer in use.
+#     Tier 3 (opt-in):  rebuild needed. node_modules, .next/.turbo, Rust target,
+#                       Python bytecode/tool caches. JS projects need reinstalling.
+#     Tier 4 (opt-in):  Python envs break. Every .venv plus the uv-managed
+#                       interpreters they point to; needs `uv sync` per project.
+#
+#   Live sessions are never purged from: Tiers 3/4 keep any repo a running
+#   process works in or that changed in the last ACTIVE_AGE_H hours, and pnpm
+#   is left alone while a pnpm process runs.
 #
 #   Pruning unreachable git objects is deliberately NOT a tier: it is the only
 #   thing here that can destroy unrecoverable work, so it sits behind
@@ -44,16 +52,19 @@
 # Sizing is now opt-in, the seven traversals are one, the traversal stays
 # on-device, and every phase prints an elapsed-time heartbeat.
 #
+# Git repos are found by globbing 1-3 levels deep (~30s) instead of a
+# whole-tree find (~3min); a 4th level cost 2min more and held no repo. That
+# is what lets git garbage sit in the default Tier 1. Tiers 3 and 4 still
+# need the whole-tree scan, and share a single pass when both run.
+#
 # Usage:
 #   ./disk-cleanup.sh                  # purge, Tier 1 only (default stage)
 #   ./disk-cleanup.sh 2                # purge, Tier 1 + Tier 2
-#   ./disk-cleanup.sh 2 3              # purge, Tiers 1 + 2 + 3
-#   ./disk-cleanup.sh all              # purge, all tiers
+#   ./disk-cleanup.sh 2 3              # purge, Tiers 1 + 2 + 3 (venvs kept)
+#   ./disk-cleanup.sh all              # purge, all tiers (venvs deleted)
 #   ./disk-cleanup.sh --defer 3        # rename into trash, rm in background
 #   ./disk-cleanup.sh --dry-run 2 3    # show what would go, delete nothing
 #   ./disk-cleanup.sh --sizes          # measure each path with du (SLOW here)
-#
-#   ./disk-cleanup.sh 4                # purge, Tier 1 + stale git pack files
 #
 #   ./disk-cleanup.sh git              # survey repos: pack / garbage / loose
 #   ./disk-cleanup.sh git --gc         # repack, keeping 2 weeks of unreachable
@@ -87,6 +98,7 @@ GIT_GC=0
 GIT_AGGRESSIVE=0
 DEFER=0
 GIT_TMP_AGE_H=24  # leave tmp packs younger than this alone; a git op may own them
+ACTIVE_AGE_H=24   # a repo committed/staged or an artifact rebuilt this recently is in use
 SIZES=-1          # -1 = auto (on for --dry-run, off otherwise)
 TOOL_TIMEOUT=600  # seconds before a cache-clean subcommand is given up on
 
@@ -145,7 +157,8 @@ is_offload_link() {
 # boundary. Move those stores to /tmp and every install silently downgrades to
 # a full copy - consuming MORE space on the near-full device, not less. So these
 # deliberately stay put: ~/.cache/uv, ~/.local/share/pnpm/store,
-# /workspaces/.pnpm-store, ~/.bun. The purge tiers shrink them instead.
+# /workspaces/.pnpm-store, ~/.bun. The purge tiers shrink uv and pnpm instead
+# (Tier 1 `uv cache clean` / `pnpm store prune`, Tier 2 a superseded pnpm store).
 #
 # One list, not two: offload_path moves a directory that exists and plants a
 # forward-looking symlink for one that does not, so the same entry covers both
@@ -171,11 +184,15 @@ OFFLOAD_PATHS=(
 # reclaimed shortly after the script exits, not before it.
 declare -A TRASH_BY_DEV=()
 
-trash_for() { # $1=path -> echoes a trash dir on the same device, or fails
+# Sets TRASH rather than echoing it: called as $(trash_for), the TRASH_BY_DEV
+# update died with the subshell, so flush_trash never saw the dir and queued
+# trees were never deleted.
+TRASH=''
+trash_for() { # $1=path -> sets TRASH to a trash dir on the same device, or fails
   local p="$1" dev root t
   dev=$(stat -c %d -- "$p" 2>/dev/null) || return 1
   if [[ -n "${TRASH_BY_DEV[$dev]:-}" ]]; then
-    printf '%s' "${TRASH_BY_DEV[$dev]}"; return 0
+    TRASH="${TRASH_BY_DEV[$dev]}"; return 0
   fi
   for root in "$WORKSPACES" "$HOME_DIR" "$(dirname -- "$p")"; do
     [[ -d "$root" ]] || continue
@@ -183,7 +200,7 @@ trash_for() { # $1=path -> echoes a trash dir on the same device, or fails
     t="${root}/.disk-cleanup-trash.$$"
     mkdir -p "$t" 2>/dev/null || continue
     TRASH_BY_DEV[$dev]="$t"
-    printf '%s' "$t"; return 0
+    TRASH="$t"; return 0
   done
   return 1
 }
@@ -236,8 +253,8 @@ purge_path() {
   fi
   if (( DRY_RUN )); then
     printf '  [dry-run] would remove %-52s %s\n' "$p" "$sz"
-  elif (( DEFER )) && t=$(trash_for "$p"); then
-    mv -- "$p" "$t/$(basename -- "$p").$RANDOM" 2>/dev/null \
+  elif (( DEFER )) && trash_for "$p"; then
+    mv -- "$p" "$TRASH/$(basename -- "$p").$RANDOM" 2>/dev/null \
       && printf '  queued  %-54s %s\n' "$p" "$sz" \
       || { rm -rf -- "$p"; printf '  removed %-54s %s\n' "$p" "$sz"; }
   else
@@ -270,6 +287,81 @@ purge_cmd() {
     124) printf '  warn: %s timed out after %ss (%s)\n' "$label" "$TOOL_TIMEOUT" "$*" ;;
     *)   printf '  warn: %s failed rc=%s (%s)\n' "$label" "$rc" "$*" ;;
   esac
+}
+
+# Superseded Claude CLI binaries (~220M each): the updater's download staging
+# and every installed version except the current one. On 2026-09-23 these held
+# 1.2G while all Tier 1 caches together freed 0B. Only downloads/ is touched in
+# .claude-files - the rest is session history. A version some process is still
+# running is skipped: its space would not free until that process exits.
+purge_old_claude() {
+  local cur v
+  for v in "${WORKSPACES}"/.claude-files/downloads/*; do
+    [[ -e "$v" || -L "$v" ]] && purge_path "$v"
+  done
+  cur=$(readlink -f "$(command -v claude 2>/dev/null)" 2>/dev/null) || cur=''
+  if [[ "$cur" != "${HOME_DIR}/.local/share/claude/versions/"* ]]; then
+    printf '  skip    old claude versions (current version unknown)\n'
+    return 0
+  fi
+  for v in "${HOME_DIR}"/.local/share/claude/versions/*; do
+    [[ -e "$v" && "$v" != "$cur" ]] || continue
+    if pgrep -f -- "$v" >/dev/null 2>&1; then
+      printf '  keep    %-54s (running)\n' "$v"
+      continue
+    fi
+    purge_path "$v"
+  done
+}
+
+# ---- live-session guards ---------------------------------------------------
+# /workspaces is shared by concurrent agent sessions; never pull packages or
+# build output out from under one. Two cheap signals mark a repo as in use:
+#   * a live process whose working directory is inside it (a Claude session,
+#     a dev server, an install)
+#   * recent activity: the artifact itself or the repo's git index changed
+#     within ACTIVE_AGE_H (an install rewrites node_modules, a commit/stage the
+#     index)
+ACTIVE_CWDS=()
+collect_active() {
+  local p c
+  for p in /proc/[0-9]*; do
+    c=$(readlink -- "$p/cwd" 2>/dev/null) || continue
+    [[ "$c" == "$WORKSPACES"/* ]] && ACTIVE_CWDS+=( "$c" )
+  done
+  return 0
+}
+
+mtime() { stat -c %Y -- "$1" 2>/dev/null || printf 0; }
+
+in_use() {
+  local p="$1" root idx c cutoff
+  cutoff=$(( $(date +%s) - ACTIVE_AGE_H * 3600 ))
+  root=$(git -C "$(dirname -- "$p")" rev-parse --show-toplevel 2>/dev/null) \
+    || root=$(dirname -- "$p")
+  for c in ${ACTIVE_CWDS[@]+"${ACTIVE_CWDS[@]}"}; do
+    [[ "$c" == "$root" || "$c" == "$root"/* ]] && return 0
+  done
+  (( $(mtime "$p") > cutoff )) && return 0
+  idx=$(git -C "$root" rev-parse --path-format=absolute --git-path index 2>/dev/null) || return 1
+  (( $(mtime "$idx") > cutoff ))
+}
+
+# A running pnpm (often `node .../pnpm.cjs install`) may be linking from the
+# store right now; pruning under it breaks that install.
+pnpm_busy() { pgrep -f '(^|/)pnpm(\.c?js)?( |$)' >/dev/null 2>&1; }
+
+# A store `pnpm store path` no longer points at is dead weight. Packages
+# already installed from it are hardlinks and keep their data.
+purge_stale_pnpm_store() {
+  local cur old="${HOME_DIR}/.local/share/pnpm/store"
+  cur=$(timeout 30 pnpm store path </dev/null 2>/dev/null) || cur=''
+  if [[ -z "$cur" ]]; then
+    printf '  skip    %-54s (pnpm store path unknown)\n' "$old"
+    return 0
+  fi
+  [[ "$cur" == "$old"* ]] && return 0
+  purge_path "$old"
 }
 
 # ---- offload / repair / restore / status ----------------------------------
@@ -326,8 +418,8 @@ offload_path() {
   fi
   # The source must be gone before ln -sfn, so remove it directly rather than
   # through purge_path (which now refuses to touch offload paths).
-  if (( DEFER )) && t=$(trash_for "$src"); then
-    mv -- "$src" "$t/$(basename -- "$src").$RANDOM" 2>/dev/null || rm -rf -- "$src"
+  if (( DEFER )) && trash_for "$src"; then
+    mv -- "$src" "$TRASH/$(basename -- "$src").$RANDOM" 2>/dev/null || rm -rf -- "$src"
   else
     rm -rf -- "$src"
   fi
@@ -393,20 +485,60 @@ status_path() {
   fi
 }
 
-# ---- tier 3 traversal ------------------------------------------------------
+# ---- tier 3/4 traversal ----------------------------------------------------
 # One traversal for all artifact names instead of seven. -xdev keeps it on the
-# loop4 device, and .codespaces / .git / stale trash are pruned outright:
-# .codespaces/shared is the VS Code server on another device, and .git holds
-# no build artifacts but plenty of inodes to stat.
-ARTIFACT_NAMES=(node_modules .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache target)
+# loop4 device, and .codespaces / .git / stale trash / worktrees are pruned outright:
+# .codespaces/shared is the VS Code server on another device, .git holds no build
+# artifacts but plenty of inodes to stat, and .claude/worktrees is other live
+# agent sessions' state - a worktree can appear or vanish between two runs of
+# this script, so its contents are never safe purge candidates.
+ARTIFACT_NAMES=(node_modules .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache target .next .turbo)
 
 find_artifacts() {
   local name_expr=() n
   for n in "${ARTIFACT_NAMES[@]}"; do name_expr+=( -o -name "$n" ); done
   name_expr=( "${name_expr[@]:1}" )   # drop the leading -o
   find "$WORKSPACES" -xdev \
-    \( -path "${WORKSPACES}/.codespaces" -o -name .git -o -name '.disk-cleanup-trash.*' \) -prune -o \
+    \( -path "${WORKSPACES}/.codespaces" -o -name .git -o -name '.disk-cleanup-trash.*' \
+       -o -path '*/.claude/worktrees' \) -prune -o \
     -type d \( "${name_expr[@]}" \) -prune -print0 2>/dev/null
+}
+
+# Scan once, even when both Tier 3 and Tier 4 run.
+ARTIFACTS=()
+ARTIFACTS_SCANNED=0
+scan_artifacts() {
+  local dir
+  (( ARTIFACTS_SCANNED )) && return 0
+  log "scanning ${WORKSPACES} for build artifacts (single pass, ~3min)"
+  collect_active
+  while IFS= read -r -d '' dir; do
+    # Build-output names only count with the manifest that produces them beside
+    # them: target needs Cargo.toml, .next/.turbo need package.json.
+    case "$(basename -- "$dir")" in
+      target)       [[ -f "$(dirname -- "$dir")/Cargo.toml" ]]   || continue ;;
+      .next|.turbo) [[ -f "$(dirname -- "$dir")/package.json" ]] || continue ;;
+    esac
+    ARTIFACTS+=( "$dir" )
+  done < <(find_artifacts)
+  ARTIFACTS_SCANNED=1
+  log "scan complete, ${#ARTIFACTS[@]} artifact directories"
+}
+
+# $1 = venv | other: purge the scanned artifacts of that kind
+purge_artifacts() {
+  local dir kind
+  for dir in ${ARTIFACTS[@]+"${ARTIFACTS[@]}"}; do
+    kind=other
+    [[ "$(basename -- "$dir")" == .venv ]] && kind=venv
+    [[ "$kind" == "$1" ]] || continue
+    if in_use "$dir"; then
+      printf '  keep    %-54s (active session)\n' "$dir"
+      continue
+    fi
+    purge_path "$dir"
+  done
+  return 0
 }
 
 # ---- git repositories ------------------------------------------------------
@@ -420,7 +552,7 @@ find_artifacts() {
 #                          is a half-written pack from a clone/fetch/gc that
 #                          died (often BECAUSE the disk filled - a failure that
 #                          feeds itself). Nothing references it. Zero risk, so
-#                          Tier 4 removes it.
+#                          Tier 1 removes it.
 #
 #   unreachable objects    reachable from no ref, but possibly a bad `reset
 #                          --hard`, a dropped stash, or an interrupted rebase.
@@ -428,10 +560,16 @@ find_artifacts() {
 #                          NOT a tier: this is the only operation in the script
 #                          that can destroy work you cannot regenerate, so it
 #                          lives in the opt-in `git` stage behind --gc.
+#
+# Repos are globbed 1-3 levels deep rather than found by a whole-tree walk (see
+# header). Hidden top-level dirs (.codespaces, trash) never match `*`, and a
+# worktree's .git is a file, so -d skips it.
 find_git_repos() {
-  find "$WORKSPACES" -xdev \
-    \( -path "${WORKSPACES}/.codespaces" -o -name '.disk-cleanup-trash.*' \) -prune -o \
-    -type d -name .git -prune -print0 2>/dev/null
+  local g
+  for g in "$WORKSPACES"/*/.git "$WORKSPACES"/*/*/.git "$WORKSPACES"/*/*/*/.git; do
+    [[ -d "$g" ]] && printf '%s\0' "$g"
+  done
+  return 0
 }
 
 # Never touch a repo mid-operation: gc during a rebase, or racing a running
@@ -452,7 +590,7 @@ git_sizes() {
        END{printf "%d %d %d", p+0, g+0, l+0}' <<<"$out"
 }
 
-# Tier 4: delete only what git itself classifies as garbage - stale tmp_pack_*
+# Tier 1: delete only what git itself classifies as garbage - stale tmp_pack_*
 # / tmp_idx_* left by a dead process. The age guard keeps us off a pack that a
 # currently-running git is still writing.
 drop_git_garbage() {
@@ -494,6 +632,13 @@ purge)
   log 'Tier 1: caches (zero risk)'
   purge_cmd "uv cache"  "${HOME_DIR}/.cache/uv" uv cache clean
   purge_cmd "npm cache" "${HOME_DIR}/.npm"      npm cache clean --force
+  if pnpm_busy; then
+    printf '  keep    %-54s (pnpm running)\n' "pnpm store + ${HOME_DIR}/.cache/pnpm"
+  else
+    # prune drops only packages no project's node_modules links to any more
+    purge_cmd "pnpm store" "" pnpm store prune
+    purge_path "${HOME_DIR}/.cache/pnpm"
+  fi
   purge_path "${HOME_DIR}/.cache/ms-playwright"
   purge_path "${HOME_DIR}/.cache/pip"
   purge_path "${HOME_DIR}/.cache/pip-audit"
@@ -503,48 +648,49 @@ purge)
   purge_path "${HOME_DIR}/.cache/puppeteer"
   purge_path "${HOME_DIR}/.cache/yarn"
   purge_path "${HOME_DIR}/.cache/go-build"
+  purge_old_claude
+  grepos=()
+  while IFS= read -r -d '' g; do grepos+=( "$(dirname -- "$g")" ); done < <(find_git_repos)
+  log "abandoned git pack files: ${#grepos[@]} repositories to check"
+  for r in ${grepos[@]+"${grepos[@]}"}; do drop_git_garbage "$r"; done
   log 'Tier 1 done'
   printf '\n'
 
   if (( RUN_T2 )); then
     log 'Tier 2: tool data and downloaded models (re-download cost)'
-    # uv-managed Python interpreters and tools; venvs created via `uv python`
-    # will need to re-fetch their interpreter after this.
-    purge_path "${HOME_DIR}/.local/share/uv"
     purge_path "${HOME_DIR}/.local/share/kokoro-models"
     purge_path "${HOME_DIR}/.local/share/piper-models"
     purge_path "${HOME_DIR}/.local/share/powershell"
     purge_path "${HOME_DIR}/.cache/powershell"
-    # NOTE: ~/.local/share/claude (Claude CLI data, ~925M) is intentionally NOT
-    # touched - it may hold wanted session history. Remove it by hand if needed.
+    # Codex CLI downloads; config, auth and session history alongside are kept.
+    purge_path "${HOME_DIR}/.codex/packages"
+    purge_path "${HOME_DIR}/.codex/.tmp"
+    purge_path "${HOME_DIR}/.codex/cache"
+    if pnpm_busy; then
+      printf '  keep    %-54s (pnpm running)\n' "${HOME_DIR}/.local/share/pnpm/store"
+    else
+      purge_stale_pnpm_store
+    fi
+    # NOTE: ~/.local/share/claude beyond versions/ (see purge_old_claude) is
+    # intentionally NOT touched - it may hold wanted session history.
     log 'Tier 2 done'
     printf '\n'
   fi
 
   if (( RUN_T3 )); then
-    log "Tier 3: scanning ${WORKSPACES} for build artifacts (single pass, ~3min)"
-    candidates=()
-    while IFS= read -r -d '' dir; do
-      # Rust target dirs only when a sibling Cargo.toml confirms it is a build dir.
-      if [[ "$(basename -- "$dir")" == target && ! -f "$(dirname -- "$dir")/Cargo.toml" ]]; then
-        continue
-      fi
-      candidates+=( "$dir" )
-    done < <(find_artifacts)
-    log "Tier 3: scan complete, ${#candidates[@]} directories to remove"
-    for dir in ${candidates[@]+"${candidates[@]}"}; do
-      purge_path "$dir"
-    done
+    log 'Tier 3: build artifacts except venvs (rebuild needed)'
+    scan_artifacts
+    purge_artifacts other
     log 'Tier 3 done'
     printf '\n'
   fi
 
   if (( RUN_T4 )); then
-    log "Tier 4: abandoned git pack files across ${WORKSPACES} (zero risk)"
-    grepos=()
-    while IFS= read -r -d '' g; do grepos+=( "$(dirname -- "$g")" ); done < <(find_git_repos)
-    log "Tier 4: ${#grepos[@]} repositories to check"
-    for r in ${grepos[@]+"${grepos[@]}"}; do drop_git_garbage "$r"; done
+    log 'Tier 4: Python envs (every .venv breaks until re-synced)'
+    scan_artifacts
+    purge_artifacts venv
+    # uv-managed interpreters: the venvs above symlink into these.
+    purge_path "${HOME_DIR}/.local/share/uv"
     log 'Tier 4 done'
     printf '\n'
   fi
@@ -553,7 +699,7 @@ purge)
   ;;
 
 git)
-  log "Scanning ${WORKSPACES} for git repositories (single pass, ~3min)"
+  log "Scanning ${WORKSPACES} for git repositories (1-3 levels deep, ~30s)"
   grepos=()
   while IFS= read -r -d '' g; do grepos+=( "$(dirname -- "$g")" ); done < <(find_git_repos)
   log "found ${#grepos[@]} repositories"
@@ -640,4 +786,10 @@ else
   freed=$(( END_AVAIL - START_AVAIL ))
   log "Reclaimed: $(human "$freed")"
   if (( DEFER )); then log 'more will free as the background rm drains'; fi
+fi
+if (( END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
+  log 'Still under 2G free. What no tier touches, by design (owner call):'
+  log '  repo run/results data, Claude session histories (.claude-files/projects,'
+  log '  ~/.claude-profiles), deleted files still held open by live sessions, and'
+  log '  likely container image-layer overhead (only a Rebuild Container frees that).'
 fi

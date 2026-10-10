@@ -14,8 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/disk-cleanup.sh`: tracked the `/workspaces` overlay-relief tool in git — it previously
   lived only at `/workspaces/disk-cleanup.sh`, outside any repo, at risk of being lost entirely on
   a full codespace rebuild (not just a resume).
+- `scripts/disk-cleanup.sh`: Tier 1 now also runs `pnpm store prune`, removes superseded Claude
+  CLI binaries (`~/.local/share/claude/versions/*` except the current one, plus
+  `.claude-files/downloads/`) and abandoned git `tmp_pack_*` files; Tier 2 adds Codex CLI downloads
+  and a pnpm store no longer in use; Tier 3 adds `.next` / `.turbo`.
+- `scripts/disk-cleanup.sh`: live-session guard — Tiers 3/4 skip any repo a running process works
+  in or whose artifact / git index changed in the last 24h; pnpm is left alone while pnpm runs;
+  `.claude/worktrees` is never scanned.
+
+### Changed
+
+- `scripts/disk-cleanup.sh`: tiers re-ordered by risk. Tier 3 no longer deletes `.venv`; Tier 4 is
+  now "Python envs" (every `.venv` + `~/.local/share/uv`, moved from Tier 2). Git garbage moved
+  from Tier 4 to Tier 1, found by a 1–3-level glob (~30s) instead of a whole-tree `find` (~3min).
+  `./disk-cleanup.sh 4` now deletes venvs, not git garbage.
 
 ### Fixed
+
+- `scripts/disk-cleanup.sh --defer`: queued trees were never deleted — `trash_for` ran in a
+  `$(...)` subshell, so the trash dir it registered was lost and `flush_trash` never removed it.
 
 - `install.sh`: symlinks `scripts/disk-cleanup.sh` to `/workspaces/disk-cleanup.sh` (tracked copy
   is now the source of truth) and appends its `repair` hook to `~/.bashrc` / `~/.zshrc`
