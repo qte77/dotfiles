@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# disk-cleanup.sh - disk relief for the /workspaces overlay, in two stages
+# disk-cleanup.sh - disk relief for a near-full dev-container disk, in two stages
 #
-# The overlay (/dev/loop4, 32G) backs both / and /workspaces, so freeing space
-# anywhere on it - including ~/.cache - relieves the same device.
+# In a typical codespace one overlay device backs both / and $WORKSPACES, so
+# freeing space anywhere on it - including ~/.cache - relieves the same device.
 #
 # STAGE 1: purge   deletes regenerable data. Idempotent, repeatable, leaves no
 #                  state behind. This is the emergency path - keep it fast.
@@ -36,25 +36,23 @@
 #
 # WHY THE ORIGINAL VERSION APPEARED TO HANG
 # -----------------------------------------
-# /workspaces is ext4 inside a loop file that sits near 100% full. Metadata
-# reads there run under 1 MB/s and block in uninterruptible (D) state, so the
-# process ignores Ctrl-C for seconds at a time. Measured on this box:
-#   one whole-tree `find`      = 3m03s wall / 2.4s CPU  (98% iowait)
-#   one `du -sh ~/.cache`      = 49s    wall / 0.6s CPU
-# The original multiplied that:
+# On a near-full loop-backed filesystem, metadata reads crawl and block in
+# uninterruptible (D) state, so the process ignores Ctrl-C for seconds at a
+# time. A single whole-tree `find` or `du` can take minutes of wall time while
+# using almost no CPU (nearly all iowait). The original multiplied that:
 #   * purge_path ran `du -sh` before every delete - a full walk to print a
 #     number, then a second full walk to unlink. Tier 1 (the DEFAULT) paid this
 #     on every cache path and emitted nothing for minutes.
-#   * Tier 3 ran seven separate whole-tree finds, one per artifact name (~21min).
-#   * find had no -xdev, so it also walked /workspaces/.codespaces/shared -
-#     a different device (/dev/root) holding the VS Code server, where deleting
-#     frees nothing on loop4.
-# Sizing is now opt-in, the seven traversals are one, the traversal stays
+#   * Tier 3 ran a separate whole-tree find per artifact name.
+#   * find had no -xdev, so it also walked $WORKSPACES/.codespaces - a mount on
+#     a different device (the VS Code server), where deleting frees nothing on
+#     the device being relieved.
+# Sizing is now opt-in, the per-name traversals are one, the traversal stays
 # on-device, and every phase prints an elapsed-time heartbeat.
 #
-# Git repos are found by globbing 1-3 levels deep (~30s) instead of a
-# whole-tree find (~3min); a 4th level cost 2min more and held no repo. That
-# is what lets git garbage sit in the default Tier 1. Tiers 3 and 4 still
+# Git repos are found by globbing 1-3 levels deep instead of a whole-tree
+# find - far faster, and repos rarely sit deeper. That is what lets git
+# garbage sit in the default Tier 1. Tiers 3 and 4 still
 # need the whole-tree scan, and share a single pass when both run.
 #
 # Usage:
@@ -64,7 +62,7 @@
 #   ./disk-cleanup.sh all              # purge, all tiers (venvs deleted)
 #   ./disk-cleanup.sh --defer 3        # rename into trash, rm in background
 #   ./disk-cleanup.sh --dry-run 2 3    # show what would go, delete nothing
-#   ./disk-cleanup.sh --sizes          # measure each path with du (SLOW here)
+#   ./disk-cleanup.sh --sizes          # measure each path with du (slow on a full disk)
 #
 #   ./disk-cleanup.sh git              # survey repos: pack / garbage / loose
 #   ./disk-cleanup.sh git --gc         # repack, keeping 2 weeks of unreachable
@@ -292,10 +290,10 @@ purge_cmd() {
   esac
 }
 
-# Superseded Claude CLI binaries (~220M each): the updater's download staging
-# and every installed version except the current one. On 2026-09-23 these held
-# 1.2G while all Tier 1 caches together freed 0B. Only downloads/ is touched in
-# .claude-files - the rest is session history. A version some process is still
+# Superseded Claude CLI binaries (a few hundred MB each): the updater's
+# download staging and every installed version except the current one. They
+# can outweigh every other Tier 1 cache combined. Only downloads/ is touched
+# in .claude-files - the rest is session history. A version some process is still
 # running is skipped: its space would not free until that process exits.
 purge_old_claude() {
   local cur v
@@ -494,8 +492,8 @@ status_path() {
 }
 
 # ---- tier 3/4 traversal ----------------------------------------------------
-# One traversal for all artifact names instead of seven. -xdev keeps it on the
-# loop4 device, and .codespaces / .git / stale trash / worktrees / site-packages
+# One traversal for all artifact names instead of one each. -xdev keeps it on
+# the device being relieved, and .codespaces / .git / stale trash / worktrees / site-packages
 # are pruned outright: .codespaces/shared is the VS Code server on another
 # device, .git holds no build artifacts but plenty of inodes to stat, and
 # .claude/worktrees is other live agent sessions' state - a worktree can appear
@@ -520,7 +518,7 @@ ARTIFACTS_SCANNED=0
 scan_artifacts() {
   local dir
   (( ARTIFACTS_SCANNED )) && return 0
-  log "scanning ${WORKSPACES} for build artifacts (single pass, ~3min)"
+  log "scanning ${WORKSPACES} for build artifacts (single pass; slow on a full disk)"
   collect_active
   while IFS= read -r -d '' dir; do
     # Build-output names only count with the manifest that produces them beside
@@ -559,10 +557,11 @@ purge_artifacts() {
 
 # ---- git repositories ------------------------------------------------------
 # Repo bloat is invisible to the purge tiers: Tier 3 prunes .git outright (it
-# holds no build artifacts, only inodes to stat). Yet one repo here carried
-# 2.0G against a 105M real repository - bigger than every cache combined.
+# holds no build artifacts, only inodes to stat). Yet a repo's .git can grow to
+# many times its real size - bigger than every cache combined.
 #
-# That 2.0G was two different things, and they belong in different places:
+# That excess is usually two different things, and they belong in different
+# places:
 #
 #   abandoned tmp_pack_*   git's own `count-objects` calls this "garbage". It
 #                          is a half-written pack from a clone/fetch/gc that
@@ -715,7 +714,7 @@ purge)
   ;;
 
 git)
-  log "Scanning ${WORKSPACES} for git repositories (1-3 levels deep, ~30s)"
+  log "Scanning ${WORKSPACES} for git repositories (1-3 levels deep)"
   grepos=()
   while IFS= read -r -d '' g; do grepos+=( "$(dirname -- "$g")" ); done < <(find_git_repos)
   log "found ${#grepos[@]} repositories"
