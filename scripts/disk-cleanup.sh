@@ -74,6 +74,10 @@
 #   ./disk-cleanup.sh status           # what is linked, local, or dangling
 #   ./disk-cleanup.sh --help
 #
+# Environment overrides:
+#   WORKSPACES=<dir>     tree to scan and relieve (default: /workspaces)
+#   OFFLOAD_ROOT=<dir>   where offload moves caches (default: /tmp/devcache)
+#
 # Run `offload` BEFORE `purge` to keep a cache's contents (they get moved);
 # run it AFTER to discard them and just point future downloads at /tmp.
 #
