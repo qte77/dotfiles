@@ -1,38 +1,66 @@
 #!/usr/bin/env bash
 #
-# disk-cleanup.sh - disk relief for a near-full dev-container disk, in two stages
+# disk-cleanup.sh - disk relief for a near-full dev-container disk
+#
+# Usage: disk-cleanup.sh [COMMAND] [TIER...] [FLAG...]
+#
+# Commands (default: purge)
+#   purge     delete regenerable data, by tier (below)
+#   top       20 largest dirs, 3 levels deep (read-only, slow)
+#   sessions  N most recently used Claude session transcripts
+#             (read-only); `sessions 30` for N=30, default 10
+#   git       survey repo pack sizes; --gc repacks (keeps 2 weeks of
+#             unreachable objects), --aggressive DISCARDS them now
+#   offload   move caches to /tmp and leave symlinks (one-time)
+#   repair    re-point offload links after /tmp is wiped
+#   restore   move offloaded caches back
+#   status    show which caches are linked, local or dangling
+#
+# Tiers (purge) - every number adds to Tier 1: `3` = Tiers 1+3
+#   1    always: caches, old Claude CLI binaries, abandoned git packs (zero risk)
+#   2    tool data, models, stale pnpm store, and screenshots inside Claude
+#        session transcripts (text kept; the images are gone for good)
+#   3    node_modules, .next/.turbo, Rust target, Python caches (rebuild needed)
+#   4    every .venv plus uv interpreters (needs `uv sync` per project)
+#   all  2 3 4
+#   Repos in use (live process, or changed within ACTIVE_AGE_H) are skipped.
+#
+# Flags
+#   -n, --dry-run  show what would go, change nothing (sizes each path)
+#   --defer        move deletions into a trash dir and rm it in the background.
+#                  Returns fast, but space frees AFTER the script exits, so
+#                  the final df is not final - re-check `df -h` in a few
+#                  minutes. Trash left by a killed run is swept next run.
+#   --sizes        du each path before deleting (slow on a full disk)
+#   --no-sizes     skip sizing, e.g. to speed up --dry-run
+#   -h, --help     this help
+#
+# Examples
+#   disk-cleanup.sh --dry-run 2 3     preview Tiers 1-3
+#   disk-cleanup.sh --defer 2 3       usual relief run, venvs kept
+#
+# Env: WORKSPACES=<dir> tree to scan (default /workspaces; HOME paths are still
+#      purged), OFFLOAD_ROOT=<dir> offload target (default /tmp/devcache)
+#
+# /tmp is wiped when the codespace stops and a dangling link makes writes fail,
+# so add to ~/.bashrc:  /workspaces/disk-cleanup.sh repair >/dev/null 2>&1 || true
+# ==============================================================================
+#
+# Design notes (not shown by --help)
 #
 # In a typical codespace one overlay device backs both / and $WORKSPACES, so
 # freeing space anywhere on it - including ~/.cache - relieves the same device.
 #
-# STAGE 1: purge   deletes regenerable data. Idempotent, repeatable, leaves no
-#                  state behind. This is the emergency path - keep it fast.
-# STAGE 2: offload MOVES caches to /tmp (a different physical disk) and leaves
-#                  symlinks behind. A one-time structural change with lasting
-#                  state, needing `repair` on every codespace start.
+# purge deletes regenerable data: idempotent, leaves no state, the emergency
+# path - keep it fast. offload MOVES caches to /tmp (a different physical disk)
+# and leaves symlinks: a one-time change with lasting state, needing `repair`
+# on every codespace start. They are separate commands on purpose - bundling them
+# meant an urgent purge sat behind a slow cache copy. Run `offload` BEFORE
+# `purge` to keep a cache's contents (they get moved); AFTER to discard them.
 #
-# They are separate stages on purpose. A purge is something you run whenever you
-# are short of space; an offload is something you do once and then maintain.
-# Bundling them meant an urgent purge sat behind a slow cache copy.
-#
-#   purge tiers, ordered by risk - each adds to the ones below it
-#     Tier 1 (default): zero risk. Caches, `pnpm store prune`, superseded Claude
-#                       CLI binaries, and abandoned git pack files (git itself
-#                       calls them garbage).
-#     Tier 2 (opt-in):  re-download cost only; nothing breaks. Tool data,
-#                       downloaded models, a pnpm store no longer in use.
-#     Tier 3 (opt-in):  rebuild needed. node_modules, .next/.turbo, Rust target,
-#                       Python bytecode/tool caches. JS projects need reinstalling.
-#     Tier 4 (opt-in):  Python envs break. Every .venv plus the uv-managed
-#                       interpreters they point to; needs `uv sync` per project.
-#
-#   Live sessions are never purged from: Tiers 3/4 keep any repo a running
-#   process works in or that changed in the last ACTIVE_AGE_H hours, and pnpm
-#   is left alone while a pnpm process runs.
-#
-#   Pruning unreachable git objects is deliberately NOT a tier: it is the only
-#   thing here that can destroy unrecoverable work, so it sits behind
-#   `git --gc`, outside `all`.
+# Pruning unreachable git objects is deliberately NOT a tier: it is the only
+# thing here that can destroy unrecoverable work, so it sits behind
+# `git --gc`, outside `all`. pnpm is left alone while a pnpm process runs.
 #
 # WHY THE ORIGINAL VERSION APPEARED TO HANG
 # -----------------------------------------
@@ -54,36 +82,6 @@
 # find - far faster, and repos rarely sit deeper. That is what lets git
 # garbage sit in the default Tier 1. Tiers 3 and 4 still
 # need the whole-tree scan, and share a single pass when both run.
-#
-# Usage:
-#   ./disk-cleanup.sh                  # purge, Tier 1 only (default stage)
-#   ./disk-cleanup.sh 2                # purge, Tier 1 + Tier 2
-#   ./disk-cleanup.sh 2 3              # purge, Tiers 1 + 2 + 3 (venvs kept)
-#   ./disk-cleanup.sh all              # purge, all tiers (venvs deleted)
-#   ./disk-cleanup.sh --defer 3        # rename into trash, rm in background
-#   ./disk-cleanup.sh --dry-run 2 3    # show what would go, delete nothing
-#   ./disk-cleanup.sh --sizes          # measure each path with du (slow on a full disk)
-#
-#   ./disk-cleanup.sh git              # survey repos: pack / garbage / loose
-#   ./disk-cleanup.sh git --gc         # repack, keeping 2 weeks of unreachable
-#   ./disk-cleanup.sh git --aggressive # --prune=now: DISCARDS unreachable NOW
-#
-#   ./disk-cleanup.sh offload          # move caches to /tmp, leave symlinks
-#   ./disk-cleanup.sh repair           # re-point links after /tmp is wiped
-#   ./disk-cleanup.sh restore          # move caches back, remove symlinks
-#   ./disk-cleanup.sh status           # what is linked, local, or dangling
-#   ./disk-cleanup.sh --help
-#
-# Environment overrides:
-#   WORKSPACES=<dir>     tree to scan and relieve (default: /workspaces)
-#   OFFLOAD_ROOT=<dir>   where offload moves caches (default: /tmp/devcache)
-#
-# Run `offload` BEFORE `purge` to keep a cache's contents (they get moved);
-# run it AFTER to discard them and just point future downloads at /tmp.
-#
-# /tmp is wiped when the codespace stops. That is fine for caches, but a
-# dangling symlink makes writes FAIL ("File exists"), so add to ~/.bashrc:
-#   /workspaces/disk-cleanup.sh repair >/dev/null 2>&1 || true
 
 set -euo pipefail
 
@@ -91,7 +89,7 @@ HOME_DIR="${HOME:-/home/vscode}"
 WORKSPACES="${WORKSPACES:-/workspaces}"   # overridable so the tree scans are testable
 OFFLOAD_ROOT="${OFFLOAD_ROOT:-/tmp/devcache}"
 
-STAGE=purge
+CMD=purge
 DRY_RUN=0
 RUN_T2=0
 RUN_T3=0
@@ -104,16 +102,22 @@ ACTIVE_AGE_H=24   # a repo committed/staged or an artifact rebuilt this recently
 SIZES=-1          # -1 = auto (on for --dry-run, off otherwise)
 TOOL_TIMEOUT=600  # seconds before a cache-clean subcommand is given up on
 
-# Print the leading comment block, whatever length it grows to.
+# Print the header's help block: comment lines up to the ==== divider.
 usage() {
-  awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
+  awk 'NR==1 {next} /^# ====/ {exit} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
   exit 0
 }
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    purge|offload|repair|restore|status|git) STAGE="$1"; shift ;;
+    purge|offload|repair|restore|status|git|top|sessions) CMD="$1"; shift ;;
   esac
+fi
+
+# Reason: a bare number would otherwise parse as a purge tier (2/3/4).
+SESSIONS_N=10
+if [[ "$CMD" == sessions && "${1:-}" =~ ^[1-9][0-9]*$ ]]; then
+  SESSIONS_N="$1"; shift
 fi
 
 for arg in "$@"; do
@@ -317,6 +321,19 @@ purge_old_claude() {
     fi
     purge_path "$v"
   done
+}
+
+# Session transcripts embed every image a session read as base64, which can
+# dwarf the text. The helper swaps each image for a one-line placeholder and
+# skips transcripts touched recently, since a live session may still append.
+strip_session_images() {
+  local py dir="${WORKSPACES}/.claude-files/projects"
+  py="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/strip-session-images.py"
+  [[ -d "$dir" ]] || { (( DRY_RUN )) && printf '  absent  %s\n' "$dir"; return 0; }
+  [[ -f "$py" ]] || { printf '  skip    session images (%s missing)\n' "$py"; return 0; }
+  local args=( "$dir" )
+  (( DRY_RUN )) || args=( --apply "$dir" )
+  python3 -I "$py" "${args[@]}" | sed 's/^/  /' || printf '  warn: session image strip failed\n'
 }
 
 # ---- live-session guards ---------------------------------------------------
@@ -578,7 +595,7 @@ purge_artifacts() {
 #                          Plain `git gc` keeps these for two weeks on purpose.
 #                          NOT a tier: this is the only operation in the script
 #                          that can destroy work you cannot regenerate, so it
-#                          lives in the opt-in `git` stage behind --gc.
+#                          lives in the opt-in `git` command behind --gc.
 #
 # Repos are globbed 1-3 levels deep rather than found by a whole-tree walk (see
 # header). Hidden top-level dirs (.codespaces, trash) never match `*`, and a
@@ -628,7 +645,7 @@ drop_git_garbage() {
 }
 
 # ---- status is read-only, so handle it before any of the reporting ---------
-if [[ "$STAGE" == status ]]; then
+if [[ "$CMD" == status ]]; then
   printf '== disk-cleanup status ==  offload root: %s\n\n' "$OFFLOAD_ROOT"
   for p in "${OFFLOAD_PATHS[@]}"; do status_path "$p"; done
   printf '\n'
@@ -636,15 +653,34 @@ if [[ "$STAGE" == status ]]; then
   exit 0
 fi
 
+# Reason: head closes the pipe early, so sort dies of SIGPIPE; under pipefail
+# that non-zero status would abort the script after printing.
+if [[ "$CMD" == top ]]; then
+  printf '== disk-cleanup top: 20 largest dirs under %s (depth 3) ==\n' "$WORKSPACES"
+  du -h --max-depth=3 "$WORKSPACES" 2>/dev/null | sort -rh | head -20 || true
+  exit 0
+fi
+
+# Main transcripts only (<project>/<session>.jsonl); subagent transcripts live
+# one level deeper and would crowd out the sessions themselves.
+if [[ "$CMD" == sessions ]]; then
+  printf '== disk-cleanup sessions: %s most recent under %s ==\n' "$SESSIONS_N" "${WORKSPACES}/.claude-files/projects"
+  find "${WORKSPACES}/.claude-files/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
+      -printf '%T@ %TY-%Tm-%Td %TH:%TM %s %P\n' 2>/dev/null \
+    | sort -rn | head -n "$SESSIONS_N" | cut -d' ' -f2- \
+    | numfmt --field=3 --to=iec --suffix=B --padding=7 || true
+  exit 0
+fi
+
 # ---- run -------------------------------------------------------------------
 START_AVAIL=$(avail_bytes "$WORKSPACES")
 printf '== disk-cleanup: %s ==  dry-run=%s defer=%s sizes=%s\n' \
-  "$STAGE" "$DRY_RUN" "$DEFER" "$SIZES"
+  "$CMD" "$DRY_RUN" "$DEFER" "$SIZES"
 df -h "$WORKSPACES" | tail -1
 if (( SIZES )); then log 'note: --sizes runs du per path; expect minutes on this disk'; fi
 printf '\n'
 
-case "$STAGE" in
+case "$CMD" in
 
 purge)
   sweep_stale_trash
@@ -690,6 +726,8 @@ purge)
     else
       purge_stale_pnpm_store
     fi
+    log 'Tier 2: screenshots embedded in Claude session transcripts'
+    strip_session_images
     # NOTE: ~/.local/share/claude beyond versions/ (see purge_old_claude) is
     # intentionally NOT touched - it may hold wanted session history.
     log 'Tier 2 done'
@@ -803,7 +841,7 @@ PENDING=$(( DEFER && ${#TRASH_BY_DEV[@]} ))
 df -h "$WORKSPACES" | tail -1
 if (( DRY_RUN )); then
   log 'Dry run: nothing was changed.'
-elif [[ "$STAGE" == git ]] && (( ! GIT_GC )); then
+elif [[ "$CMD" == git ]] && (( ! GIT_GC )); then
   log 'Survey only: nothing was changed.'
 elif (( PENDING )); then
   log 'Deletes are still running in the background; free space above is not final.'
@@ -814,7 +852,7 @@ else
 fi
 if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
-  log '  repo run/results data, Claude session histories (.claude-files/projects,'
-  log '  ~/.claude-profiles), deleted files still held open by live sessions, and'
+  log '  repo run/results data, Claude session text (.claude-files/projects beyond'
+  log '  Tier 2 image stripping, ~/.claude-profiles), deleted files still held open by live sessions, and'
   log '  likely container image-layer overhead (only a Rebuild Container frees that).'
 fi

@@ -21,9 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/disk-cleanup.sh`: live-session guard — Tiers 3/4 skip any repo a running process works
   in or whose artifact / git index changed in the last 24h; pnpm is left alone while pnpm runs;
   `.claude/worktrees` is never scanned.
+- `scripts/disk-cleanup.sh top`: read-only list of the 20 largest dirs, 3 levels deep.
+- `scripts/disk-cleanup.sh sessions [N]`: read-only list of the N (default 10) most recently used
+  Claude session transcripts, with date, size and project.
+- `scripts/disk-cleanup.sh` Tier 2: strips base64 screenshots from Claude session transcripts
+  under `.claude-files/projects` via the new `scripts/strip-session-images.py`. Text, reasoning
+  and tool calls are kept; each image becomes a one-line placeholder and is not recoverable.
+  Transcripts modified in the last 2h are skipped, as a live session may still be appending.
 
 ### Changed
 
+- `scripts/disk-cleanup.sh --help`: now a ~40-line summary of commands, tiers and flags (was the
+  88-line header with design notes). `--defer` now says space frees after the script exits.
+  "Stage" is renamed "command" (`STAGE` → `CMD`); behaviour is unchanged.
 - `scripts/disk-cleanup.sh`: tiers re-ordered by risk. Tier 3 no longer deletes `.venv`; Tier 4 is
   now "Python envs" (every `.venv` + `~/.local/share/uv`, moved from Tier 2). Git garbage moved
   from Tier 4 to Tier 1, found by a 1–3-level glob (~30s) instead of a whole-tree `find` (~3min).
