@@ -88,8 +88,7 @@ set -euo pipefail
 HOME_DIR="${HOME:-/home/vscode}"
 WORKSPACES="${WORKSPACES:-/workspaces}"   # overridable so the tree scans are testable
 OFFLOAD_ROOT="${OFFLOAD_ROOT:-/tmp/devcache}"
-# Claude Code's own config dir, as Claude resolves it - not a host-specific
-# persistence path, so the same script works wherever ~/.claude lives.
+# Claude Code's own config dir, resolved the way Claude Code resolves it.
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME_DIR}/.claude}"
 
 CMD=purge
