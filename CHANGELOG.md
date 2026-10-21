@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `.claude-files/projects` via the new `scripts/strip-session-images.py`. Text, reasoning
   and tool calls are kept; each image becomes a one-line placeholder and is not recoverable.
   Transcripts modified in the last 2h are skipped, as a live session may still be appending.
+- `tests/test_strip_session_images.py`: first tests in this repo, for the screenshot strip
+  (`uv run --no-project --with pytest pytest tests`).
 
 ### Changed
 
@@ -41,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `scripts/strip-session-images.py` (Tier 2 screenshot strip) looked stuck and could fail on a
+  full disk. It printed nothing until exit (one summary line, buffered through a pipe),
+  JSON-parsed every line of every transcript, held whole files in memory, and wrote each
+  rewritten copy next to the original, which fails with too little free space. Now:
+  - one progress line per file with images, largest files first, run unbuffered (`python3 -u`)
+  - lines without image data are passed through without parsing
+  - stripped copies are streamed to `--stage-dir` (default `$TMPDIR`, i.e. `/tmp`, another
+    disk), checked there, then written back over the original in place, so the full disk
+    needs no extra room
+  - a file that changed during processing is left untouched
+  - one failing file no longer stops the run (exit 1 at the end)
+- `scripts/disk-cleanup.sh` Tier 1: no longer deletes a Claude CLI download in
+  `.claude-files/downloads/` that is less than 30 min old, since the updater may still be
+  writing it.
 - `scripts/disk-cleanup.sh --defer`: queued trees were never deleted — `trash_for` ran in a
   `$(...)` subshell, so the trash dir it registered was lost and `flush_trash` never removed it.
 - `scripts/disk-cleanup.sh --defer`: no longer prints a "Reclaimed" figure or the low-space hint

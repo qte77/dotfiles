@@ -304,9 +304,16 @@ purge_cmd() {
 # in .claude-files - the rest is session history. A version some process is still
 # running is skipped: its space would not free until that process exits.
 purge_old_claude() {
-  local cur v
+  local cur v now
+  now=$(date +%s)
   for v in "${WORKSPACES}"/.claude-files/downloads/*; do
-    [[ -e "$v" || -L "$v" ]] && purge_path "$v"
+    [[ -e "$v" || -L "$v" ]] || continue
+    # Reason: the updater writes here; a file this new may still be downloading.
+    if (( now - $(mtime "$v") < 1800 )); then
+      printf '  keep    %-54s (downloaded < 30 min ago)\n' "$v"
+      continue
+    fi
+    purge_path "$v"
   done
   cur=$(readlink -f "$(command -v claude 2>/dev/null)" 2>/dev/null) || cur=''
   if [[ "$cur" != "${HOME_DIR}/.local/share/claude/versions/"* ]]; then
@@ -326,14 +333,18 @@ purge_old_claude() {
 # Session transcripts embed every image a session read as base64, which can
 # dwarf the text. The helper swaps each image for a one-line placeholder and
 # skips transcripts touched recently, since a live session may still append.
+# It stages each stripped copy on TMPDIR (/tmp: a different disk) and writes it
+# back in place, so it works even when this disk is nearly full; -u streams its
+# per-file progress instead of holding it until exit.
 strip_session_images() {
   local py dir="${WORKSPACES}/.claude-files/projects"
   py="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/strip-session-images.py"
   [[ -d "$dir" ]] || { (( DRY_RUN )) && printf '  absent  %s\n' "$dir"; return 0; }
   [[ -f "$py" ]] || { printf '  skip    session images (%s missing)\n' "$py"; return 0; }
-  local args=( "$dir" )
-  (( DRY_RUN )) || args=( --apply "$dir" )
-  python3 -I "$py" "${args[@]}" | sed 's/^/  /' || printf '  warn: session image strip failed\n'
+  local args=( --stage-dir "${TMPDIR:-/tmp}" "$dir" )
+  (( DRY_RUN )) || args=( --apply "${args[@]}" )
+  python3 -u -I "$py" "${args[@]}" 2>&1 | sed -u 's/^/  /' \
+    || printf '  warn: some transcripts were skipped or failed (see above)\n'
 }
 
 # ---- live-session guards ---------------------------------------------------
