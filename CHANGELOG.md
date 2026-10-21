@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `scripts/disk-cleanup.sh`: Claude paths (session transcripts, CLI downloads) now come from
+  Claude Code's own config dir, `$CLAUDE_CONFIG_DIR` or `~/.claude`, instead of the
+  codespace-specific `/workspaces/.claude-files` it is persisted to. The `sessions` title now
+  reads `last N Claude sessions (<dir>)`.
 - `scripts/strip-session-images.py` (Tier 2 screenshot strip) looked stuck and could fail on a
   full disk. It printed nothing until exit (one summary line, buffered through a pipe),
   JSON-parsed every line of every transcript, held whole files in memory, and wrote each
