@@ -6,7 +6,10 @@
 #
 # Commands (default: purge)
 #   purge     delete regenerable data, by tier (below)
-#   top       20 largest dirs, 3 levels deep (read-only, slow)
+#   top       20 largest dirs under the scanned tree and HOME, 3 levels deep
+#             (read-only, slow)
+#   data      results/runs/snapshots/output/logs dirs: size, last write, and
+#             whether git tracks them (read-only; deleting them is your call)
 #   sessions  last N Claude sessions, newest first, from ~/.claude/projects
 #             (read-only); `sessions 30` for N=30, default 10
 #   git       survey repo pack sizes; --gc repacks (keeps 2 weeks of
@@ -20,7 +23,8 @@
 #   1    always: caches, old Claude CLI binaries, abandoned git packs (zero risk)
 #   2    tool data, models, stale pnpm store, and screenshots inside Claude
 #        session transcripts (text kept; the images are gone for good)
-#   3    node_modules, .next/.turbo, Rust target, Python caches (rebuild needed)
+#   3    node_modules, .next/.turbo, Rust target, Python caches, and leftover
+#        Claude agent worktrees with nothing uncommitted (rebuild needed)
 #   4    every .venv plus uv interpreters (needs `uv sync` per project)
 #   all  2 3 4
 #   Repos in use (live process, or changed within ACTIVE_AGE_H) are skipped.
@@ -112,7 +116,7 @@ usage() {
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    purge|offload|repair|restore|status|git|top|sessions) CMD="$1"; shift ;;
+    purge|offload|repair|restore|status|git|top|data|sessions) CMD="$1"; shift ;;
   esac
 fi
 
@@ -152,6 +156,26 @@ avail_bytes() {
 }
 
 human() { numfmt --to=iec --suffix=B "$1" 2>/dev/null || printf '%s bytes' "$1"; }
+
+# Says whether the temp dir draws on the same storage as $WORKSPACES, since
+# clearing temp files only relieves this disk when it does. A device-ID
+# mismatch alone is not proof: an overlay root and the volume beneath it have
+# different IDs yet report the same size and free space, so matching df
+# figures also count as shared.
+tmp_note() {
+  local t="${TMPDIR:-/tmp}" s1='' a1=0 s2='' a2=0 diff
+  [[ -d "$t" ]] || return 0
+  read -r s1 a1 s2 a2 <<<"$(df -B1 --output=size,avail "$WORKSPACES" "$t" 2>/dev/null \
+    | tail -n +2 | tr '\n' ' ')"
+  [[ -n "$s2" ]] || return 0
+  diff=$(( a1 - a2 )); (( diff < 0 )) && diff=$(( -diff ))
+  if [[ "$(stat -c %d -- "$WORKSPACES" 2>/dev/null)" == "$(stat -c %d -- "$t" 2>/dev/null)" ]] \
+     || { [[ "$s1" == "$s2" ]] && (( diff < 64 * 1024 * 1024 )); }; then
+    log "${t} shares this storage: clearing it frees space here too"
+  else
+    log "${t} is separate storage ($(human "$a2") free): clearing it frees nothing here"
+  fi
+}
 
 # True when $1 is a symlink this script planted into the offload root.
 is_offload_link() {
@@ -531,8 +555,8 @@ status_path() {
 # are pruned outright: .codespaces/shared is the VS Code server on another
 # device, .git holds no build artifacts but plenty of inodes to stat, and
 # .claude/worktrees is other live agent sessions' state - a worktree can appear
-# or vanish between two runs of this script, so its contents are never safe
-# purge candidates. site-packages is the inside of a venv: one not named .venv
+# or vanish between two runs of this script, so its contents are never purged
+# piecemeal; purge_agent_worktrees judges each worktree as a whole. site-packages is the inside of a venv: one not named .venv
 # would otherwise have its __pycache__ dirs picked by Tier 3, which keeps venvs.
 ARTIFACT_NAMES=(node_modules .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache target .next .turbo)
 
@@ -587,6 +611,109 @@ purge_artifacts() {
     purge_path "$dir"
   done
   return 0
+}
+
+# ---- leftover agent worktrees ----------------------------------------------
+# Claude Code checks agent worktrees out under <repo>/.claude/worktrees/, each a
+# full copy of the repo, often with its own node_modules. Tier 3 removes a
+# whole worktree, but only when nothing can be lost or interrupted:
+#   * no live process inside it, no git operation running, not locked, and its
+#     index unchanged for ACTIVE_AGE_H
+#   * no uncommitted or untracked changes, and every ignored file is a
+#     regenerable build artifact (an ignored .env is a reason to keep it)
+#   * HEAD is on some branch or remote ref, so a detached HEAD's commits do not
+#     become unreachable
+# The branch it had checked out is kept, so its commits survive the removal.
+WORKTREE_DISPOSABLE=( "${ARTIFACT_NAMES[@]}" dist build coverage .wrangler '*.tsbuildinfo' )
+
+is_disposable() {
+  local n
+  for n in "${WORKTREE_DISPOSABLE[@]}"; do
+    # shellcheck disable=SC2053  # $n is a glob pattern on purpose
+    [[ "$1" == $n ]] && return 0
+  done
+  return 1
+}
+
+# $1=worktree -> echoes why it must stay; echoes nothing when it can go
+worktree_keep_reason() {
+  local wt="$1" gd c e rc='' cutoff
+  cutoff=$(( $(date +%s) - ACTIVE_AGE_H * 3600 ))
+  for c in ${ACTIVE_CWDS[@]+"${ACTIVE_CWDS[@]}"}; do
+    [[ "$c" == "$wt" || "$c" == "$wt"/* ]] && { printf 'active session'; return 0; }
+  done
+  gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) \
+    || { printf 'not a git worktree'; return 0; }
+  [[ -e "$gd/locked" ]] && { printf 'locked'; return 0; }
+  [[ -e "$gd/index.lock" || -d "$gd/rebase-merge" || -d "$gd/rebase-apply" ]] \
+    && { printf 'git operation in progress'; return 0; }
+  (( $(mtime "$gd/index") > cutoff )) && { printf 'changed < %sh ago' "$ACTIVE_AGE_H"; return 0; }
+  # Reason: the trailing rc= entry tells a clean tree from a failed git status,
+  # which would otherwise also print nothing. --no-optional-locks stops status
+  # from refreshing the index: that write bumps its mtime, so the age check
+  # above would see the worktree as active on every later run.
+  while IFS= read -r -d '' e; do
+    case "$e" in
+      rc=*)   rc="${e#rc=}" ;;
+      '!! '*) e="${e#!! }"; e="${e%/}"
+              is_disposable "$(basename -- "$e")" \
+                || { printf 'ignored file %s' "$e"; return 0; } ;;
+      *)      printf 'uncommitted changes'; return 0 ;;
+    esac
+  done < <(git --no-optional-locks -C "$wt" status --porcelain -z --ignored 2>/dev/null
+           printf 'rc=%s\0' "$?")
+  [[ "$rc" == 0 ]] || { printf 'git status failed'; return 0; }
+  [[ -n "$(git -C "$wt" for-each-ref --count=1 --contains HEAD 2>/dev/null)" ]] \
+    || printf 'commits on no branch'
+  return 0
+}
+
+purge_agent_worktrees() {
+  local repo="$1" wt why n=0
+  for wt in "$repo"/.claude/worktrees/*/; do
+    wt="${wt%/}"
+    [[ -f "$wt/.git" ]] || continue   # a linked worktree's .git is a file
+    why=$(worktree_keep_reason "$wt")
+    if [[ -n "$why" ]]; then
+      printf '  keep    %-54s (%s)\n' "$wt" "$why"
+      continue
+    fi
+    purge_path "$wt"
+    n=$(( n + 1 ))
+  done
+  # Drops the admin entries of worktrees whose directory is now gone.
+  if (( n && ! DRY_RUN )); then git -C "$repo" worktree prune 2>/dev/null || true; fi
+  return 0
+}
+
+# ---- data survey -----------------------------------------------------------
+# Run output, results and snapshots are often the largest thing in a repo, and
+# no tier touches them: only their owner knows whether they can go. The `data`
+# command lists them so that call is quick to make. It never deletes.
+DATA_NAMES=(results runs snapshots output outputs logs)
+DATA_MIN_KIB=$(( 10 * 1024 ))
+
+# Same pruning as find_artifacts, and build artifacts are skipped too: a logs/
+# inside node_modules is not anyone's data.
+find_data_dirs() {
+  local skip=() want=() n
+  for n in "${ARTIFACT_NAMES[@]}"; do skip+=( -o -name "$n" ); done
+  for n in "${DATA_NAMES[@]}"; do want+=( -o -name "$n" ); done
+  find "$WORKSPACES" -xdev \
+    \( -path "${WORKSPACES}/.codespaces" -o -name .git -o -name '.disk-cleanup-trash.*' \
+       -o -name site-packages "${skip[@]}" \) -prune -o \
+    -type d \( "${want[@]:1}" \) -prune -print0 2>/dev/null
+}
+
+# $1=dir -> tracked | untracked | no repo. A .gitkeep or .gitignore alone does
+# not count as tracked: deleting the dir loses everything else in it for good.
+data_git_state() {
+  local n
+  if ! git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'no repo'; return 0
+  fi
+  n=$(git -C "$1" ls-files 2>/dev/null | awk '!/(^|\/)\.git(keep|ignore)$/ {c++} END {print c+0}')
+  if (( n )); then printf 'tracked'; else printf 'untracked'; fi
 }
 
 # ---- git repositories ------------------------------------------------------
@@ -663,14 +790,42 @@ if [[ "$CMD" == status ]]; then
   for p in "${OFFLOAD_PATHS[@]}"; do status_path "$p"; done
   printf '\n'
   df -h "$WORKSPACES" /tmp 2>/dev/null | tail -n +1
+  tmp_note
   exit 0
 fi
 
 # Reason: head closes the pipe early, so sort dies of SIGPIPE; under pipefail
 # that non-zero status would abort the script after printing.
+# HOME is included because tool installs and caches there fill the same disk
+# in most setups; -x keeps du off other mounts, where nothing frees space here.
 if [[ "$CMD" == top ]]; then
-  printf '== disk-cleanup top: 20 largest dirs under %s (depth 3) ==\n' "$WORKSPACES"
-  du -h --max-depth=3 "$WORKSPACES" 2>/dev/null | sort -rh | head -20 || true
+  roots=( "$WORKSPACES" )
+  [[ "$HOME_DIR" == "$WORKSPACES" || "$HOME_DIR" == "$WORKSPACES"/* ]] || roots+=( "$HOME_DIR" )
+  printf '== disk-cleanup top: 20 largest dirs under %s (depth 3) ==\n' "${roots[*]}"
+  du -xh --max-depth=3 "${roots[@]}" 2>/dev/null | sort -rh | head -20 || true
+  exit 0
+fi
+
+if [[ "$CMD" == data ]]; then
+  printf '== disk-cleanup data: %s dirs of %s or more under %s (read-only) ==\n' \
+    "${DATA_NAMES[*]}" "$(human $(( DATA_MIN_KIB * 1024 )))" "$WORKSPACES"
+  log 'scanning (single pass; slow on a full disk)'
+  rows=()
+  while IFS= read -r -d '' d; do
+    # du --time reports the newest write anywhere inside, in the same walk.
+    IFS=$'\t' read -r kib ts _ < <(du -xs --time --time-style=+%s -- "$d" 2>/dev/null) || continue
+    (( kib >= DATA_MIN_KIB )) || continue
+    rows+=( "$(printf '%012d\t%s\t%s\t%s' "$kib" "$ts" "$(data_git_state "$d")" "$d")" )
+  done < <(find_data_dirs)
+  log "scan complete, ${#rows[@]} dirs"
+  printf '\n  %7s  %-16s  %-9s  %s\n' SIZE 'LAST WRITE' GIT PATH
+  while IFS=$'\t' read -r kib ts st d; do
+    [[ -n "$d" ]] || continue
+    printf '  %7s  %-16s  %-9s  %s\n' "$(human $(( 10#$kib * 1024 )))" \
+      "$(date -d "@$ts" '+%Y-%m-%d %H:%M')" "$st" "$d"
+  done < <(printf '%s\n' ${rows[@]+"${rows[@]}"} | sort -rn)
+  printf '\n  tracked: git restore brings the tracked files back after a delete.\n'
+  printf '  untracked / no repo: a delete is permanent.\n'
   exit 0
 fi
 
@@ -690,6 +845,7 @@ START_AVAIL=$(avail_bytes "$WORKSPACES")
 printf '== disk-cleanup: %s ==  dry-run=%s defer=%s sizes=%s\n' \
   "$CMD" "$DRY_RUN" "$DEFER" "$SIZES"
 df -h "$WORKSPACES" | tail -1
+tmp_note
 if (( SIZES )); then log 'note: --sizes runs du per path; expect minutes on this disk'; fi
 printf '\n'
 
@@ -751,6 +907,8 @@ purge)
     log 'Tier 3: build artifacts except venvs (rebuild needed)'
     scan_artifacts
     purge_artifacts other
+    log 'Tier 3: leftover agent worktrees'
+    for r in ${grepos[@]+"${grepos[@]}"}; do purge_agent_worktrees "$r"; done
     log 'Tier 3 done'
     printf '\n'
   fi
@@ -865,7 +1023,8 @@ else
 fi
 if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
-  log "  repo run/results data, Claude session text (${CLAUDE_DIR}/projects beyond"
-  log '  Tier 2 image stripping, ~/.claude-profiles), deleted files still held open by live sessions, and'
-  log '  likely container image-layer overhead (only a Rebuild Container frees that).'
+  log "  repo run/results data (survey it: $0 data), Claude session text"
+  log "  (${CLAUDE_DIR}/projects beyond Tier 2 image stripping), deleted files still"
+  log '  held open by live sessions, and likely container image-layer overhead'
+  log '  (only a Rebuild Container frees that).'
 fi
