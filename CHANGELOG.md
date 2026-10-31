@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/disk-cleanup.sh`: Claude paths (session transcripts, CLI downloads) now come from
   Claude Code's own config dir, `$CLAUDE_CONFIG_DIR` or `~/.claude`, instead of a fixed path
   under the scanned tree. The `sessions` title now reads `last N Claude sessions (<dir>)`.
+- `scripts/disk-cleanup.sh` Tier 4: deletes only `~/.local/share/uv/python`, not all of
+  `~/.local/share/uv`, which also held uv's stored credentials and installed tools.
 - `scripts/disk-cleanup.sh`: the low-space hint no longer lists a directory that can be a link
   into one already counted.
 - `scripts/strip-session-images.py` (Tier 2 screenshot strip) looked stuck and could fail on a

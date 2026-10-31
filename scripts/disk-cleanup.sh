@@ -917,8 +917,10 @@ purge)
     log 'Tier 4: Python envs (every .venv breaks until re-synced)'
     scan_artifacts
     purge_artifacts venv
-    # uv-managed interpreters: the venvs above symlink into these.
-    purge_path "${HOME_DIR}/.local/share/uv"
+    # uv-managed interpreters: the venvs above symlink into these. Only python/
+    # goes: the rest of the uv dir holds stored credentials and installed tools,
+    # which no `uv sync` brings back.
+    purge_path "${HOME_DIR}/.local/share/uv/python"
     log 'Tier 4 done'
     printf '\n'
   fi
