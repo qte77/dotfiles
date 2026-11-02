@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- VS Code settings: the integrated terminal scrolls 3x faster with the mouse wheel and renders
+  without GPU acceleration.
 - `scripts/disk-cleanup.sh --help`: now a ~40-line summary of commands, tiers and flags (was the
   88-line header with design notes). `--defer` now says space frees after the script exits.
   "Stage" is renamed "command" (`STAGE` → `CMD`); behaviour is unchanged.
