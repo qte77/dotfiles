@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `.claude-files/projects` via the new `scripts/strip-session-images.py`. Text, reasoning
   and tool calls are kept; each image becomes a one-line placeholder and is not recoverable.
   Transcripts modified in the last 2h are skipped, as a live session may still be appending.
+- `scripts/disk-cleanup.sh` Tier 3: removes leftover Claude agent worktrees under
+  `<repo>/.claude/worktrees/` when nothing can be lost: no live process inside, not locked, no git
+  operation running, index unchanged for 24h, no uncommitted or untracked changes, only build
+  artifacts among ignored files, and HEAD on a branch or remote ref. Its branch is kept.
+- `scripts/disk-cleanup.sh data`: read-only list of `results`/`runs`/`snapshots`/`output(s)`/`logs`
+  dirs of 10MB or more, with size, last write and whether git tracks them.
+- `scripts/disk-cleanup.sh`: `purge` and `status` say whether the temp dir shares storage with the
+  scanned tree, i.e. whether clearing it frees any space there.
 - `tests/test_strip_session_images.py`: first tests in this repo, for the screenshot strip
   (`uv run --no-project --with pytest pytest tests`).
 
@@ -42,12 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now "Python envs" (every `.venv` + `~/.local/share/uv`, moved from Tier 2). Git garbage moved
   from Tier 4 to Tier 1, found by a 1–3-level glob (~30s) instead of a whole-tree `find` (~3min).
   `./disk-cleanup.sh 4` now deletes venvs, not git garbage.
+- `scripts/disk-cleanup.sh top`: also covers HOME and stays on one filesystem (`du -x`).
 
 ### Fixed
 
 - `scripts/disk-cleanup.sh`: Claude paths (session transcripts, CLI downloads) now come from
   Claude Code's own config dir, `$CLAUDE_CONFIG_DIR` or `~/.claude`, instead of a fixed path
   under the scanned tree. The `sessions` title now reads `last N Claude sessions (<dir>)`.
+- `scripts/disk-cleanup.sh` Tier 4: deletes only `~/.local/share/uv/python`, not all of
+  `~/.local/share/uv`, which also held uv's stored credentials and installed tools.
+- `scripts/disk-cleanup.sh`: the low-space hint no longer lists a directory that can be a link
+  into one already counted.
 - `scripts/strip-session-images.py` (Tier 2 screenshot strip) looked stuck and could fail on a
   full disk. It printed nothing until exit (one summary line, buffered through a pipe),
   JSON-parsed every line of every transcript, held whole files in memory, and wrote each
