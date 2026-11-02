@@ -7,7 +7,7 @@
 # Commands (default: purge)
 #   purge     delete regenerable data, by tier (below)
 #   top       20 largest dirs, 3 levels deep (read-only, slow)
-#   sessions  N most recently used Claude session transcripts
+#   sessions  last N Claude sessions, newest first, from ~/.claude/projects
 #             (read-only); `sessions 30` for N=30, default 10
 #   git       survey repo pack sizes; --gc repacks (keeps 2 weeks of
 #             unreachable objects), --aggressive DISCARDS them now
@@ -88,6 +88,8 @@ set -euo pipefail
 HOME_DIR="${HOME:-/home/vscode}"
 WORKSPACES="${WORKSPACES:-/workspaces}"   # overridable so the tree scans are testable
 OFFLOAD_ROOT="${OFFLOAD_ROOT:-/tmp/devcache}"
+# Claude Code's own config dir, resolved the way Claude Code resolves it.
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME_DIR}/.claude}"
 
 CMD=purge
 DRY_RUN=0
@@ -301,12 +303,12 @@ purge_cmd() {
 # Superseded Claude CLI binaries (a few hundred MB each): the updater's
 # download staging and every installed version except the current one. They
 # can outweigh every other Tier 1 cache combined. Only downloads/ is touched
-# in .claude-files - the rest is session history. A version some process is still
+# in the Claude dir - the rest is session history. A version some process is still
 # running is skipped: its space would not free until that process exits.
 purge_old_claude() {
   local cur v now
   now=$(date +%s)
-  for v in "${WORKSPACES}"/.claude-files/downloads/*; do
+  for v in "${CLAUDE_DIR}"/downloads/*; do
     [[ -e "$v" || -L "$v" ]] || continue
     # Reason: the updater writes here; a file this new may still be downloading.
     if (( now - $(mtime "$v") < 1800 )); then
@@ -337,7 +339,7 @@ purge_old_claude() {
 # back in place, so it works even when this disk is nearly full; -u streams its
 # per-file progress instead of holding it until exit.
 strip_session_images() {
-  local py dir="${WORKSPACES}/.claude-files/projects"
+  local py dir="${CLAUDE_DIR}/projects"
   py="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/strip-session-images.py"
   [[ -d "$dir" ]] || { (( DRY_RUN )) && printf '  absent  %s\n' "$dir"; return 0; }
   [[ -f "$py" ]] || { printf '  skip    session images (%s missing)\n' "$py"; return 0; }
@@ -675,8 +677,8 @@ fi
 # Main transcripts only (<project>/<session>.jsonl); subagent transcripts live
 # one level deeper and would crowd out the sessions themselves.
 if [[ "$CMD" == sessions ]]; then
-  printf '== disk-cleanup sessions: %s most recent under %s ==\n' "$SESSIONS_N" "${WORKSPACES}/.claude-files/projects"
-  find "${WORKSPACES}/.claude-files/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
+  printf '== last %s Claude sessions (%s) ==\n' "$SESSIONS_N" "${CLAUDE_DIR}/projects"
+  find "${CLAUDE_DIR}/projects/" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
       -printf '%T@ %TY-%Tm-%Td %TH:%TM %s %P\n' 2>/dev/null \
     | sort -rn | head -n "$SESSIONS_N" | cut -d' ' -f2- \
     | numfmt --field=3 --to=iec --suffix=B --padding=7 || true
@@ -863,7 +865,7 @@ else
 fi
 if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
-  log '  repo run/results data, Claude session text (.claude-files/projects beyond'
+  log "  repo run/results data, Claude session text (${CLAUDE_DIR}/projects beyond"
   log '  Tier 2 image stripping, ~/.claude-profiles), deleted files still held open by live sessions, and'
   log '  likely container image-layer overhead (only a Rebuild Container frees that).'
 fi
