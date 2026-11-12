@@ -10,6 +10,11 @@
 #             (read-only, slow)
 #   data      results/runs/snapshots/output/logs dirs: size, last write, and
 #             whether git tracks them (read-only; deleting them is your call)
+#   home      dirs of 100MB or more under HOME with their last write, so unused
+#             tool installs show up (read-only; deleting them is your call)
+#   archive   pack the subagent transcripts of sessions idle for ACTIVE_AGE_H
+#             into one .tar.zst each, verify, then delete the originals
+#             (lossless). Restore one: tar -C <session dir> -I zstd -xf <archive>
 #   sessions  last N Claude sessions, newest first, from ~/.claude/projects
 #             (read-only); `sessions 30` for N=30, default 10
 #   git       survey repo pack sizes; --gc repacks (keeps 2 weeks of
@@ -21,8 +26,9 @@
 #
 # Tiers (purge) - every number adds to Tier 1: `3` = Tiers 1+3
 #   1    always: caches, old Claude CLI binaries, abandoned git packs (zero risk)
-#   2    tool data, models, stale pnpm store, and screenshots inside Claude
-#        session transcripts (text kept; the images are gone for good)
+#   2    tool data, models, stale pnpm store; with --strip-images also the
+#        screenshots inside Claude session transcripts (text kept; the images
+#        are gone for good)
 #   3    node_modules, .next/.turbo, Rust target, Python caches, and leftover
 #        Claude agent worktrees with nothing uncommitted (rebuild needed)
 #   4    every .venv plus uv interpreters (needs `uv sync` per project)
@@ -37,6 +43,9 @@
 #                  minutes. Trash left by a killed run is swept next run.
 #   --sizes        du each path before deleting (slow on a full disk)
 #   --no-sizes     skip sizing, e.g. to speed up --dry-run
+#   --strip-images Tier 2 also strips screenshots from session transcripts.
+#                  Off by default, `all` included: it is the one lossy step
+#                  on session data
 #   -h, --help     this help
 #
 # Examples
@@ -44,7 +53,8 @@
 #   disk-cleanup.sh --defer 2 3       usual relief run, venvs kept
 #
 # Env: WORKSPACES=<dir> tree to scan (default /workspaces; HOME paths are still
-#      purged), OFFLOAD_ROOT=<dir> offload target (default /tmp/devcache)
+#      purged), OFFLOAD_ROOT=<dir> offload target (default /tmp/devcache),
+#      ARCHIVE_DIR=<dir> archive target (default $WORKSPACES/.claude-archive)
 #
 # /tmp is wiped when the codespace stops and a dangling link makes writes fail,
 # so add to ~/.bashrc:  /workspaces/disk-cleanup.sh repair >/dev/null 2>&1 || true
@@ -94,9 +104,11 @@ WORKSPACES="${WORKSPACES:-/workspaces}"   # overridable so the tree scans are te
 OFFLOAD_ROOT="${OFFLOAD_ROOT:-/tmp/devcache}"
 # Claude Code's own config dir, resolved the way Claude Code resolves it.
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME_DIR}/.claude}"
+ARCHIVE_DIR="${ARCHIVE_DIR:-${WORKSPACES}/.claude-archive}"
 
 CMD=purge
 DRY_RUN=0
+STRIP_IMAGES=0
 RUN_T2=0
 RUN_T3=0
 RUN_T4=0
@@ -116,7 +128,7 @@ usage() {
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    purge|offload|repair|restore|status|git|top|data|sessions) CMD="$1"; shift ;;
+    purge|offload|repair|restore|status|git|top|data|home|archive|sessions) CMD="$1"; shift ;;
   esac
 fi
 
@@ -135,6 +147,7 @@ for arg in "$@"; do
     --aggressive)  GIT_GC=1; GIT_AGGRESSIVE=1 ;;
     --sizes)       SIZES=1 ;;
     --no-sizes)    SIZES=0 ;;
+    --strip-images) STRIP_IMAGES=1 ;;
     2|tier2|--tier2) RUN_T2=1 ;;
     3|tier3|--tier3) RUN_T3=1 ;;
     4|tier4|--tier4) RUN_T4=1 ;;
@@ -716,6 +729,85 @@ data_git_state() {
   if (( n )); then printf 'tracked'; else printf 'untracked'; fi
 }
 
+# ---- subagent archive ------------------------------------------------------
+# Session data is kept for later analysis, so this is the lossless relief for
+# it: subagent transcripts are plain JSONL and compress about 5x. Each idle
+# session's subagents/ folder becomes one .tar.zst; the originals are deleted
+# only after the archive is checked against them. Resuming such a session
+# works, but without its subagent history until the archive is extracted back.
+# Transcripts can hold secrets and the archive may sit in a shared tree, so it
+# is private (700 dirs, 600 files), set explicitly: umask is not reliable in
+# every environment.
+
+# $1=session dir -> true when nothing in it or its transcript changed lately.
+# Reason: recursive on purpose - an append to a nested agent-*.jsonl does not
+# touch any directory's mtime.
+session_idle() {
+  [[ -z "$(find "$1" "$1.jsonl" -newermt "${ACTIVE_AGE_H} hours ago" -print -quit 2>/dev/null)" ]]
+}
+
+archive_session() {
+  local sess="$1" proj id dest kib need avail n_disk n_tar
+  proj=$(basename -- "$(dirname -- "$sess")"); id=$(basename -- "$sess")
+  kib=$(du -sk -- "$sess/subagents" | cut -f1)
+  if (( DRY_RUN )); then
+    printf '  [dry-run] would archive %8dKB  %s/%s\n' "$kib" "$proj" "$id"
+    return 0
+  fi
+  # Room for the archive (~a third of the input, with margin) on its own disk.
+  need=$(( kib * 1024 / 3 + 64 * 1024 * 1024 ))
+  avail=$(avail_bytes "$ARCHIVE_DIR")
+  if (( avail < need )); then
+    printf '  STOP    only %s free in %s, need %s\n' "$(human "$avail")" "$ARCHIVE_DIR" "$(human "$need")"
+    return 2
+  fi
+  # Timestamped, so a session archived, resumed and archived again keeps both.
+  dest="$ARCHIVE_DIR/subagents/$proj/$id.$(date +%Y%m%d%H%M%S).tar.zst"
+  mkdir -p -- "$ARCHIVE_DIR/subagents/$proj"
+  chmod 700 -- "$ARCHIVE_DIR" "$ARCHIVE_DIR/subagents" "$ARCHIVE_DIR/subagents/$proj"
+  n_disk=$(find "$sess/subagents" -type f | wc -l)
+  (( n_disk )) || return 3   # empty folder: nothing to gain
+  # Reason: tar -d only checks what is IN the archive; the file counts (taken
+  # again just before rm) and the second idle check catch a file a resumed
+  # session added after packing, which would otherwise be deleted unarchived.
+  # Mode set before any data is written; tar keeps it when it truncates the file.
+  if install -m 600 /dev/null "$dest.part" \
+     && tar -C "$sess" -I 'zstd -10 -T0 -q' -cf "$dest.part" subagents \
+     && tar -C "$sess" -I 'zstd -q' -df "$dest.part" \
+     && n_tar=$(tar -I 'zstd -q' -tf "$dest.part" | grep -cv '/$') \
+     && (( n_tar == n_disk )) \
+     && [[ $(find "$sess/subagents" -type f | wc -l) == "$n_disk" ]] \
+     && session_idle "$sess" \
+     && mv -- "$dest.part" "$dest"; then
+    rm -rf -- "$sess/subagents"
+    printf '  archived %7dKB -> %6dKB  %s/%s\n' "$kib" $(( $(stat -c %s -- "$dest") / 1024 )) "$proj" "$id"
+  else
+    rm -f -- "$dest.part"
+    printf '  FAIL    %s/%s (originals kept)\n' "$proj" "$id"
+    return 1
+  fi
+}
+
+archive_subagents() {
+  local sa sess n_done=0 n_kept=0 n_failed=0 rc
+  # Reason: the free-space check runs df on this dir, which fails until it exists.
+  (( DRY_RUN )) || mkdir -p -- "$ARCHIVE_DIR"
+  for sa in "${CLAUDE_DIR}"/projects/*/*/subagents; do
+    [[ -d "$sa" ]] || continue
+    sess=$(dirname -- "$sa")
+    if ! session_idle "$sess"; then n_kept=$(( n_kept + 1 )); continue; fi
+    rc=0; archive_session "$sess" || rc=$?
+    case "$rc" in
+      0) n_done=$(( n_done + 1 )) ;;
+      2) break ;;
+      3) ;;
+      *) n_failed=$(( n_failed + 1 )) ;;
+    esac
+  done
+  log "archive: ${n_done} sessions $( (( DRY_RUN )) && echo 'to archive' || echo archived), ${n_kept} active kept, ${n_failed} failed"
+  log "archives: ${ARCHIVE_DIR}/subagents"
+}
+
 # ---- git repositories ------------------------------------------------------
 # Repo bloat is invisible to the purge tiers: Tier 3 prunes .git outright (it
 # holds no build artifacts, only inodes to stat). Yet a repo's .git can grow to
@@ -829,6 +921,23 @@ if [[ "$CMD" == data ]]; then
   exit 0
 fi
 
+# Tool installs (toolchains, SDKs, models) are written once and then only read,
+# so LAST WRITE is roughly the install date, not proof of use. Claude's dirs
+# (~/.claude*, kept as session data) and anything under the scanned tree are
+# left out: `sessions`, `archive`, `data` and the tiers cover those.
+if [[ "$CMD" == home ]]; then
+  printf '== disk-cleanup home: dirs of 100MB or more under %s, depth 3 (read-only) ==\n' "$HOME_DIR"
+  log 'scanning (slow on a full disk)'
+  printf '\n  %7s  %-10s  %s\n' SIZE 'LAST WRITE' PATH
+  du -x --time --time-style=+%Y-%m-%d -t 100M --max-depth=3 -h "$HOME_DIR" 2>/dev/null \
+    | awk -F'\t' -v c="$(readlink -f -- "$CLAUDE_DIR")" -v w="$WORKSPACES" -v h="$HOME_DIR" '
+        $3 == h || index($3, c) == 1 || index($3, w"/") == 1 || index($3, h"/.claude") == 1 {next}
+        {printf "  %7s  %-10s  %s\n", $1, $2, $3}' \
+    | sort -k1,1 -rh || true
+  printf '\n  Deleting a tool dir is your call: check nothing uses it first.\n'
+  exit 0
+fi
+
 # Main transcripts only (<project>/<session>.jsonl); subagent transcripts live
 # one level deeper and would crowd out the sessions themselves.
 if [[ "$CMD" == sessions ]]; then
@@ -895,8 +1004,12 @@ purge)
     else
       purge_stale_pnpm_store
     fi
-    log 'Tier 2: screenshots embedded in Claude session transcripts'
-    strip_session_images
+    if (( STRIP_IMAGES )); then
+      log 'Tier 2: screenshots embedded in Claude session transcripts'
+      strip_session_images
+    else
+      printf '  skip    session screenshots (lossy; add --strip-images to strip them)\n'
+    fi
     # NOTE: ~/.local/share/claude beyond versions/ (see purge_old_claude) is
     # intentionally NOT touched - it may hold wanted session history.
     log 'Tier 2 done'
@@ -1001,6 +1114,11 @@ restore)
   log 'Restore done'
   ;;
 
+archive)
+  log "Archive: subagent transcripts of sessions idle for ${ACTIVE_AGE_H}h -> ${ARCHIVE_DIR}"
+  archive_subagents
+  ;;
+
 esac
 
 printf '\n'
@@ -1025,8 +1143,8 @@ else
 fi
 if (( ! PENDING && END_AVAIL < 2 * 1024 * 1024 * 1024 )); then
   log 'Still under 2G free. What no tier touches, by design (owner call):'
-  log "  repo run/results data (survey it: $0 data), Claude session text"
-  log "  (${CLAUDE_DIR}/projects beyond Tier 2 image stripping), deleted files still"
-  log '  held open by live sessions, and likely container image-layer overhead'
-  log '  (only a Rebuild Container frees that).'
+  log "  repo run/results data (survey it: $0 data), tool installs in HOME"
+  log "  ($0 home), Claude session data (compress it losslessly: $0 archive),"
+  log '  deleted files still held open by live sessions, and likely container'
+  log '  image-layer overhead (only a Rebuild Container frees that).'
 fi
