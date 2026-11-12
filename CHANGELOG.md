@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `.github/workflows/lint-actions.yml`: adopt the shared `qte77/.github` reusable
   `lint-actions` gate (actionlint + yamllint + zizmor) on push/PR/dispatch to `main`.
+- `scripts/disk-cleanup.sh archive`: packs the subagent transcripts of every Claude session idle
+  for 24h into one private `.tar.zst` per session under `$ARCHIVE_DIR` (default
+  `$WORKSPACES/.claude-archive`), checks it against the originals (content, file count, idle
+  again) and only then deletes them. Lossless; subagent JSONL compresses about 5x. `--dry-run`
+  previews.
+- `scripts/disk-cleanup.sh home`: read-only list of directories of 100MB or more under HOME, three
+  levels deep, with their last write, so unused tool installs show up. Claude's dirs and the
+  scanned tree are left out.
 - `scripts/disk-cleanup.sh`: tracked the `/workspaces` overlay-relief tool in git — it previously
   lived only at `/workspaces/disk-cleanup.sh`, outside any repo, at risk of being lost entirely on
   a full codespace rebuild (not just a resume).
@@ -43,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `scripts/disk-cleanup.sh` Tier 2: stripping screenshots from Claude session transcripts is now
+  opt-in with `--strip-images` (`all` does not include it), since it is the one step that loses
+  session data. Without the flag Tier 2 says what it skipped.
 - VS Code settings: the integrated terminal scrolls 3x faster with the mouse wheel and renders
   without GPU acceleration.
 - `scripts/disk-cleanup.sh --help`: now a ~40-line summary of commands, tiers and flags (was the
