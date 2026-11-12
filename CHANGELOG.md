@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.github/workflows/lint-actions.yml`: adopt the shared `qte77/.github` reusable
+  `lint-actions` gate (actionlint + yamllint + zizmor) on push/PR/dispatch to `main`.
 - `scripts/disk-cleanup.sh archive`: packs the subagent transcripts of every Claude session idle
   for 24h into one private `.tar.zst` per session under `$ARCHIVE_DIR` (default
   `$WORKSPACES/.claude-archive`), checks it against the originals (content, file count, idle

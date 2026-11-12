@@ -1,0 +1,16 @@
+---
+name: Lint Actions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-actions:
+    uses: qte77/.github/.github/workflows/lint-actions.yml@afd639d96fffa8e59873a9b352d575a9a627236d  # 2026-11-12
