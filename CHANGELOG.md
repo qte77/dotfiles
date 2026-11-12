@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.github/workflows/lint-actions.yml`: adopt the shared `qte77/.github` reusable
+  `lint-actions` gate (actionlint + yamllint + zizmor) on push/PR/dispatch to `main`.
 - `scripts/disk-cleanup.sh`: tracked the `/workspaces` overlay-relief tool in git — it previously
   lived only at `/workspaces/disk-cleanup.sh`, outside any repo, at risk of being lost entirely on
   a full codespace rebuild (not just a resume).
