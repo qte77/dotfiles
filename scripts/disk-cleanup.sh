@@ -15,6 +15,9 @@
 #   archive   pack the subagent transcripts of sessions idle for ACTIVE_AGE_H
 #             into one .tar.zst each, verify, then delete the originals
 #             (lossless). Restore one: tar -C <session dir> -I zstd -xf <archive>
+#             With --transcripts it also compresses idle main transcripts.
+#             Restore one: zstd -d <archive> -o <projects>/<project>/<id>.jsonl
+#             (no -f: never overwrite a transcript that exists again)
 #   sessions  last N Claude sessions, newest first, from ~/.claude/projects
 #             (read-only); `sessions 30` for N=30, default 10
 #   git       survey repo pack sizes; --gc repacks (keeps 2 weeks of
@@ -25,7 +28,8 @@
 #   status    show which caches are linked, local or dangling
 #
 # Tiers (purge) - every number adds to Tier 1: `3` = Tiers 1+3
-#   1    always: caches, old Claude CLI binaries, abandoned git packs (zero risk)
+#   1    always, also on its own as `1`: caches, old Claude CLI binaries,
+#        abandoned git packs (zero risk)
 #   2    tool data, models, stale pnpm store; with --strip-images also the
 #        screenshots inside Claude session transcripts (text kept; the images
 #        are gone for good)
@@ -46,6 +50,9 @@
 #   --strip-images Tier 2 also strips screenshots from session transcripts.
 #                  Off by default, `all` included: it is the one lossy step
 #                  on session data
+#   --transcripts  archive also compresses each idle main transcript to a
+#                  .jsonl.zst (lossless, about 5-10x). Claude Code cannot list
+#                  or resume that session until it is restored
 #   -h, --help     this help
 #
 # Examples
@@ -109,6 +116,7 @@ ARCHIVE_DIR="${ARCHIVE_DIR:-${WORKSPACES}/.claude-archive}"
 CMD=purge
 DRY_RUN=0
 STRIP_IMAGES=0
+TRANSCRIPTS=0
 RUN_T2=0
 RUN_T3=0
 RUN_T4=0
@@ -148,6 +156,8 @@ for arg in "$@"; do
     --sizes)       SIZES=1 ;;
     --no-sizes)    SIZES=0 ;;
     --strip-images) STRIP_IMAGES=1 ;;
+    --transcripts) TRANSCRIPTS=1 ;;
+    1|tier1|--tier1) ;;   # Tier 1 always runs; accepted so `1` is not an error
     2|tier2|--tier2) RUN_T2=1 ;;
     3|tier3|--tier3) RUN_T3=1 ;;
     4|tier4|--tier4) RUN_T4=1 ;;
@@ -342,9 +352,13 @@ purge_cmd() {
 # can outweigh every other Tier 1 cache combined. Only downloads/ is touched
 # in the Claude dir - the rest is session history. A version some process is still
 # running is skipped: its space would not free until that process exits.
+# Reason: running is read from each process's executable, not its command line,
+# which shows only `claude`, `claude --resume` or `claude --continue`.
 purge_old_claude() {
-  local cur v now
+  local cur v now p running=''
   now=$(date +%s)
+  for p in /proc/[0-9]*/exe; do running+=$'\n'"$(readlink -- "$p" 2>/dev/null || true)"; done
+  running+=$'\n'
   for v in "${CLAUDE_DIR}"/downloads/*; do
     [[ -e "$v" || -L "$v" ]] || continue
     # Reason: the updater writes here; a file this new may still be downloading.
@@ -361,7 +375,9 @@ purge_old_claude() {
   fi
   for v in "${HOME_DIR}"/.local/share/claude/versions/*; do
     [[ -e "$v" && "$v" != "$cur" ]] || continue
-    if pgrep -f -- "$v" >/dev/null 2>&1; then
+    # Reason: a pattern match, not grep on a here-string: that needs a temp
+    # file, which a full disk can refuse, and would then miss a running version.
+    if [[ "$running" == *$'\n'"$v"$'\n'* ]]; then
       printf '  keep    %-54s (running)\n' "$v"
       continue
     fi
@@ -808,6 +824,88 @@ archive_subagents() {
   log "archives: ${ARCHIVE_DIR}/subagents"
 }
 
+# Main transcripts (<project>/<session>.jsonl) hold most of a session's bytes,
+# a large share of them logged API requests, so they compress 5-10x. Opt-in
+# (--transcripts) because Claude Code cannot list or resume a compressed
+# session until it is restored. A transcript goes only when its session is idle,
+# its Claude process has exited and no process holds it open. It is first
+# renamed aside, so a resumed session writes a new file instead of appending to
+# the one being archived; it is deleted only after the archive decompresses
+# byte-identical to it.
+# Reason: idle alone is not enough. A session left open for days writes nothing,
+# yet its next turn would start a new transcript holding only that turn.
+live_session_ids() {
+  local f j pid sid
+  for f in "${CLAUDE_DIR}"/sessions/*.json; do
+    [[ -f "$f" ]] || continue
+    j=$(<"$f") || continue
+    [[ "$j" =~ \"pid\":[[:space:]]*([0-9]+) ]] || continue; pid="${BASH_REMATCH[1]}"
+    [[ "$j" =~ \"sessionId\":[[:space:]]*\"([^\"]+)\" ]] || continue; sid="${BASH_REMATCH[1]}"
+    [[ -d "/proc/$pid" ]] && printf '%s\n' "$sid"
+  done
+  return 0
+}
+
+archive_transcripts() {
+  local t aside sess sid proj dest size mt a avail open_files live p
+  local n_done=0 n_kept=0 n_failed=0 in_b=0 out_b=0
+  open_files=$'\n'$(for p in /proc/[0-9]*/fd/*; do readlink -- "$p" 2>/dev/null || true; done)$'\n'
+  live=$'\n'$(live_session_ids)$'\n'
+  (( DRY_RUN )) || mkdir -p -- "$ARCHIVE_DIR"
+  for t in "${CLAUDE_DIR}"/projects/*/*.jsonl; do
+    [[ -f "$t" ]] || continue
+    sess="${t%.jsonl}"; sid=$(basename -- "$sess")
+    # fd links are resolved paths; CLAUDE_DIR may reach the file through a link.
+    if ! session_idle "$sess" || [[ "$live" == *$'\n'"$sid"$'\n'* ]] \
+       || [[ "$open_files" == *$'\n'"$(readlink -f -- "$t")"$'\n'* ]]; then
+      n_kept=$(( n_kept + 1 )); continue
+    fi
+    proj=$(basename -- "$(dirname -- "$t")")
+    size=$(stat -c %s -- "$t" 2>/dev/null) || continue
+    mt=$(mtime "$t")
+    if (( DRY_RUN )); then
+      printf '  [dry-run] would compress %8dKB  %s/%s\n' $(( size / 1024 )) "$proj" "${t##*/}"
+      n_done=$(( n_done + 1 )); in_b=$(( in_b + size )); continue
+    fi
+    avail=$(avail_bytes "$ARCHIVE_DIR")
+    if (( avail < size / 3 + 64 * 1024 * 1024 )); then
+      printf '  STOP    only %s free in %s\n' "$(human "$avail")" "$ARCHIVE_DIR"; break
+    fi
+    mkdir -p -- "$ARCHIVE_DIR/transcripts/$proj"
+    chmod 700 -- "$ARCHIVE_DIR" "$ARCHIVE_DIR/transcripts" "$ARCHIVE_DIR/transcripts/$proj"
+    dest="$ARCHIVE_DIR/transcripts/$proj/$sid.$(date +%Y%m%d%H%M%S).jsonl.zst"
+    aside="$t.archiving.$$"
+    mv -- "$t" "$aside" || { n_failed=$(( n_failed + 1 )); continue; }
+    # Reason: the byte compare proves the archive; the size and mtime check
+    # catches a write through a descriptor opened before the rename.
+    if install -m 600 /dev/null "$dest.part" \
+       && zstd -q -10 -T0 -f -c -- "$aside" > "$dest.part" \
+       && zstd -q -dc -- "$dest.part" | cmp -s - "$aside" \
+       && [[ $(stat -c %s -- "$aside") == "$size" && $(mtime "$aside") == "$mt" ]] \
+       && sync -- "$dest.part" && mv -- "$dest.part" "$dest"; then
+      rm -f -- "$aside"
+      a=$(stat -c %s -- "$dest")
+      n_done=$(( n_done + 1 )); in_b=$(( in_b + size )); out_b=$(( out_b + a ))
+      printf '  compressed %7dKB -> %6dKB  %s/%s\n' $(( size / 1024 )) $(( a / 1024 )) "$proj" "${t##*/}"
+    else
+      rm -f -- "$dest.part"
+      n_failed=$(( n_failed + 1 ))
+      if [[ -e "$t" ]]; then
+        printf '  FAIL    %s/%s (original kept as %s)\n' "$proj" "${t##*/}" "${aside##*/}"
+      else
+        mv -- "$aside" "$t"
+        printf '  FAIL    %s/%s (original kept)\n' "$proj" "${t##*/}"
+      fi
+    fi
+  done
+  if (( DRY_RUN )); then
+    log "transcripts: ${n_done} to compress ($(human "$in_b")), ${n_kept} active kept"
+  else
+    log "transcripts: ${n_done} compressed, $(human "$in_b") -> $(human "$out_b"), ${n_kept} active kept, ${n_failed} failed"
+  fi
+  log "archives: ${ARCHIVE_DIR}/transcripts"
+}
+
 # ---- git repositories ------------------------------------------------------
 # Repo bloat is invisible to the purge tiers: Tier 3 prunes .git outright (it
 # holds no build artifacts, only inodes to stat). Yet a repo's .git can grow to
@@ -1116,6 +1214,12 @@ restore)
 
 archive)
   log "Archive: subagent transcripts of sessions idle for ${ACTIVE_AGE_H}h -> ${ARCHIVE_DIR}"
+  # Reason: transcripts first. Archiving a session's subagents removes a dir
+  # inside it, which makes the session look active again for ACTIVE_AGE_H.
+  if (( TRANSCRIPTS )); then
+    log "Archive: main transcripts of idle, closed sessions"
+    archive_transcripts
+  fi
   archive_subagents
   ;;
 
