@@ -30,7 +30,7 @@ check pass "git rm --cached a.pyc"
 check pass "cat > /tmp/x.sh <<'EOF'${nl}mkdir -p out${nl}it's done${nl}EOF"
 check pass "python3 - f <<'EOF'${nl}s='rm -rf /x'${nl}print(\"it's\")${nl}EOF"
 # --- literal variables set earlier in the same command
-check pass "D=/tmp/claude-1000/p/s/scratchpad/leap71; mkdir -p \$D; ls \$D"
+check pass "D=/tmp/claude-1000/p/s/scratchpad/proj; mkdir -p \$D; ls \$D"
 check pass "D=/home/vscode/cdpb/x && rm -rf \"\$D\"/old"
 check pass "B=/tmp/claude-1000/p/s; D=\$B/scratchpad/y; rm -rf \${D}"
 # --- regenerable caches, anywhere under /workspaces or scratch
@@ -132,5 +132,16 @@ mkdir -p /tmp/rmg-sym && ln -sfn /workspaces /tmp/rmg-sym/node_modules
 check ask 'rm -rf node_modules/' /tmp/rmg-sym
 rm -f /tmp/rmg-sym/node_modules && rmdir /tmp/rmg-sym
 check pass 'timeout 30 rm -rf /tmp/x/y'
+# --- mktemp results are judged by where mktemp creates them
+check pass 't(){ d=$(mktemp -d /home/vscode/wt/mdcase.XXXX); (cd $d; true); rm -rf $d; }; t'
+check pass 'd=$(mktemp -d); rm -rf "$d"'
+check pass 'd=$(mktemp -d -p /home/vscode/cdpb); rm -rf $d/sub'
+check ask 'd=$(mktemp -d /workspaces/qte77/x.XXXX); rm -rf $d'
+check ask 'd=$(mktemp -d -p /workspaces); rm -rf $d'
+check ask 'd=$(mktemp -d /home/vscode/wt/x.XXXX); d=/workspaces/q; rm -rf $d'
+check ask 'TMPDIR=/workspaces d=$(mktemp -d); rm -rf $d'
+check ask 'd=$(mktemp -d /tmp/../workspaces/x.XXXX); rm -rf $d'
+check ask 'd=$(mktemp -d "$X"); rm -rf $d'
+check ask 'rm -rf $d; d=$(mktemp -d)'
 [ "$fail" -eq 0 ] && echo "rm-guard: all cases OK"
 exit "$fail"

@@ -19,7 +19,8 @@ that visibly starts with one of these commands.
 Parser hardening (2026-11-22, from a security review): shell comments are stripped quote-aware (a quoted `#` stays an
 operand), backslash-newline continuations are joined first, operands with control characters ask, a wrapper whose
 options take values (`timeout -s KILL rm`, `env -u X rm`) asks when the command word is uncertain, any `rm`/`rmdir`
-after an `ln` or `cp -s` in the same command asks, and a cache target that is a symlink asks.
+after an `ln` or `cp -s` in the same command asks, and a cache target that is a symlink asks. `NAME=$(mktemp ...)` is judged by where mktemp creates the
+path (template directory, `-p DIR`, or `$TMPDIR`), from the assignment on.
 
 ## How it is built
 
@@ -45,5 +46,5 @@ these commands. Repos that track their own `.claude/settings.json` with `rm`/`mk
 
 ## Open items (owner)
 
-- rtk-rewrite.sh answers "allow" for whole compound commands (separate decision).
-- Owner tests T2, T3, T5 in `/home/vscode/cdpb/reviews/fable-advice-rm-mkdir.md`.
+- Review how allow answers from other PreToolUse hooks combine with this hook (separate decision).
+- Owner tests T2, T3, T5 from the design review (kept outside this repo).

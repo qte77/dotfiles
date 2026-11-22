@@ -5,7 +5,7 @@ Pairs with the user-level allow rules for rm/rmdir/mkdir under the same roots. T
 can be fooled by `..`, wrappers, extra operands or variables; this hook resolves each target with realpath
 and asks whenever any target is outside the roots or cannot be resolved statically. It never allows on its
 own, and it is not a boundary (find -delete, git clean, python3 -c and redirects bypass it); it restores the
-prompt that the removed blanket ask rules used to give. Design: /home/vscode/cdpb/reviews/fable-advice-rm-mkdir.md.
+prompt that the removed blanket ask rules used to give. Policy and design: rm-guard.md next to this file.
 """
 
 import json
@@ -19,7 +19,7 @@ import sys
 # - CREATE roots: mkdir only (creation cannot destroy data), relative paths included;
 #   plus rm/rmdir of regenerable tool caches (CACHE_NAMES).
 # - Anything else, and every rm/rmdir/mv in a repo: ask.
-ROOTS = ("/tmp", "/home/vscode/wt", "/home/vscode/cdpb")
+ROOTS = ("/tmp", "/home/vscode/wt", "/home/vscode/cdpb")  # nosec B108 - policy roots, not temp-file creation
 CREATE_ROOTS = ROOTS + ("/workspaces",)
 # Regenerable tool caches: rm/rmdir of these is allowed anywhere under CREATE_ROOTS, relative paths included.
 CACHE_NAMES = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules", "htmlcov", ".coverage"}
@@ -71,15 +71,20 @@ def strip_comments(command: str) -> str:
     while i < n:
         ch = command[i]
         if quote:
-            out.append(ch)
             if ch == "\\" and quote == '"' and i + 1 < n:
-                out.append(command[i + 1]); i += 2; continue
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            out.append(ch)
             if ch == quote:
                 quote = ""
         elif ch == "\\" and i + 1 < n:
-            out.append(command[i:i + 2]); i += 2; continue
+            out.append(command[i:i + 2])
+            i += 2
+            continue
         elif ch in "'\"":
-            quote = ch; out.append(ch)
+            quote = ch
+            out.append(ch)
         elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
             while i < n and command[i] != "\n":
                 i += 1
@@ -146,11 +151,9 @@ def track_cd(words: list[str], cwd: str | None, env: dict[str, str], subshells: 
     return dest if os.path.isdir(dest) else None
 
 
-def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str | None = None) -> str | None:
-    """Return a reason when this rm/rmdir/mkdir/mv touches something outside ROOTS, else None."""
-    env = env or {}
+def command_word(words: list[str]) -> tuple[str, list[str], bool, bool]:
+    """Skip wrappers, keywords, assignments and wrapper arguments; return (cmd, operands, via_xargs, saw_wrapper)."""
     words = list(words)
-    all_words = list(words)
     via_xargs = saw_wrapper = False
     while words:
         word = words[0].lstrip("({")
@@ -162,18 +165,15 @@ def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str
         saw_wrapper = saw_wrapper or word in WRAPPERS
         words.pop(0)
     cmd = os.path.basename(words[0]) if words else ""
-    if cmd not in COMMANDS:
-        # Reason: wrapper options that take a value ("timeout -s KILL rm", "env -u X rm") shift the command word;
-        # if a guarded name still follows a wrapper, the parse is not certain, so ask.
-        if saw_wrapper and any(os.path.basename(w) in COMMANDS for w in all_words):
-            return "a wrapper with options precedes a guarded command and could not be parsed with certainty"
-        return None
-    if via_xargs:
-        return f"{cmd} takes its targets from xargs input"
+    return cmd, words[1:], via_xargs, saw_wrapper
+
+
+def collect_targets(cmd: str, operands: list[str], env: dict[str, str]) -> tuple[list[str], str | None]:
+    """Return the expanded non-option operands, or a reason when an operand cannot be judged."""
     targets, options_done = [], False
-    for word in words[1:]:
+    for word in operands:
         if any(ord(c) < 32 for c in word):
-            return f"{cmd} operand contains a control character"
+            return [], f"{cmd} operand contains a control character"
         if NULL_REDIRECT.match(word):
             continue
         if not options_done and word == "--":
@@ -182,62 +182,167 @@ def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str
         if not options_done and word.startswith("-"):
             # Reason: mv -t/--target-directory names a destination inside an option, where operand checks miss it.
             if cmd == "mv" and re.match(r"^(-[a-zA-Z]*t|--t)", word):
-                return f"mv option '{word}' names a target directory"
+                return [], f"mv option '{word}' names a target directory"
             continue
         targets.append(expand(word, env))
-    for target in targets:
-        if cmd == "mkdir":
-            # Reason: creating a directory cannot destroy data; relative paths land in the session's repo or scratch dir.
-            if ".." in target.split("/"):
-                return f"mkdir target '{target}' contains '..'"
-            if UNSAFE.search(target):
-                # Reason: loop variables ("for r in ...; mkdir -p /workspaces/x/$r-src") cannot be resolved statically;
-                # creation is harmless when the literal part before the first expansion already sits inside a root.
-                prefix = os.path.dirname(target[:UNSAFE.search(target).start()])
-                if not (os.path.isabs(prefix) and inside_roots(prefix + "/x", CREATE_ROOTS) and "~" not in target):
-                    return f"mkdir target '{target}' uses expansion or a glob outside a literal root prefix"
-                continue
-            # Reason: "mkdir -p /home/vscode/wt" (the root itself) is harmless; only rm/rmdir must stay strictly below.
-            if os.path.isabs(target) and not (inside_roots(target, CREATE_ROOTS)
-                                              or os.path.realpath(target) in CREATE_ROOTS):
-                return f"mkdir target '{target}' is outside {', '.join(CREATE_ROOTS)}"
-            continue
-        if cmd in ("rm", "rmdir") and os.path.basename(target.rstrip("/")) in CACHE_NAMES:
-            # Reason: tool caches are regenerated by the next run; deleting one cannot lose work.
-            if UNSAFE.search(target) or ".." in target.split("/"):
-                return f"{cmd} cache target '{target}' uses expansion, a glob or '..'"
-            if os.path.isabs(target) and not inside_roots(target, CREATE_ROOTS):
-                return f"{cmd} cache target '{target}' is outside {', '.join(CREATE_ROOTS)}"
-            # Reason: "rm -rf node_modules/" through a symlink deletes the link's target tree.
-            if os.path.islink(os.path.join(cwd or os.getcwd(), target).rstrip("/")):
-                return f"{cmd} cache target '{target}' is a symlink"
-            continue
-        if GLOB_ONLY.search(target) and not re.search(r"[$`~{}()<>]", target) and cmd != "mv":
-            # Reason: "rm $S/*.md" in a session scratchpad is routine; a glob cannot climb above its literal prefix,
-            # so it passes when that prefix sits strictly below a root, outside the shared tree, and no glob part
-            # starts with '.' (which could match '..' where globskipdots is off).
-            literal = target[:GLOB_ONLY.search(target).start()]
-            prefix = os.path.dirname(literal) if not literal.endswith("/") else literal.rstrip("/")
-            rest = target[len(prefix):]
-            if (os.path.isabs(prefix) and ".." not in target.split("/") and inside_roots(prefix)
-                    and not SHARED.match(os.path.realpath(prefix))
-                    and not any(part.startswith(".") and GLOB_ONLY.search(part) for part in rest.split("/"))):
-                continue
-            return f"{cmd} target '{target}' uses a glob outside a session or scratch folder"
-        if UNSAFE.search(target):
-            return f"{cmd} target '{target}' uses shell expansion or a glob"
-        if not os.path.isabs(target):
-            if cwd is None or ".." in target.split("/"):
-                return f"{cmd} target '{target}' is relative and the working directory is not certain"
-            # Reason: a relative target is judged where it will land: the session cwd plus any literal cd before it.
-            target = os.path.join(cwd, target)
-        if ".." in target.split("/"):
-            return f"{cmd} target '{target}' contains '..'"
-        if not inside_roots(target):
-            return f"{cmd} target '{target}' resolves outside {', '.join(ROOTS)}"
-        if cmd != "mkdir" and SHARED.match(os.path.realpath(target)):
-            return f"{cmd} target '{target}' is a shared session scratch directory"
+    return targets, None
+
+
+def check_mkdir(target: str) -> str | None:
+    """Creating a directory cannot destroy data; relative paths land in the session's repo or scratch dir."""
+    if ".." in target.split("/"):
+        return f"mkdir target '{target}' contains '..'"
+    if UNSAFE.search(target):
+        # Reason: loop variables ("for r in ...; mkdir -p /workspaces/x/$r-src") cannot be resolved statically;
+        # creation is harmless when the literal part before the first expansion already sits inside a root.
+        prefix = os.path.dirname(target[:UNSAFE.search(target).start()])
+        if not (os.path.isabs(prefix) and inside_roots(prefix + "/x", CREATE_ROOTS) and "~" not in target):
+            return f"mkdir target '{target}' uses expansion or a glob outside a literal root prefix"
+        return None
+    # Reason: "mkdir -p /home/vscode/wt" (the root itself) is harmless; only rm/rmdir must stay strictly below.
+    if os.path.isabs(target) and not (inside_roots(target, CREATE_ROOTS) or os.path.realpath(target) in CREATE_ROOTS):
+        return f"mkdir target '{target}' is outside {', '.join(CREATE_ROOTS)}"
     return None
+
+
+def check_cache(cmd: str, target: str, cwd: str | None) -> str | None:
+    """Tool caches are regenerated by the next run; deleting one cannot lose work."""
+    if UNSAFE.search(target) or ".." in target.split("/"):
+        return f"{cmd} cache target '{target}' uses expansion, a glob or '..'"
+    if os.path.isabs(target) and not inside_roots(target, CREATE_ROOTS):
+        return f"{cmd} cache target '{target}' is outside {', '.join(CREATE_ROOTS)}"
+    # Reason: "rm -rf node_modules/" through a symlink deletes the link's target tree.
+    if os.path.islink(os.path.join(cwd or os.getcwd(), target).rstrip("/")):
+        return f"{cmd} cache target '{target}' is a symlink"
+    return None
+
+
+def check_glob(cmd: str, target: str) -> str | None:
+    """A glob cannot climb above its literal prefix: pass when that prefix sits strictly below a scratch root.
+
+    Reason: "rm $S/*.md" in a session scratchpad is routine. The prefix must be outside the shared tree, and no
+    glob part may start with '.' (which could match '..' where globskipdots is off).
+    """
+    literal = target[:GLOB_ONLY.search(target).start()]
+    prefix = os.path.dirname(literal) if not literal.endswith("/") else literal.rstrip("/")
+    rest = target[len(prefix):]
+    if (os.path.isabs(prefix) and ".." not in target.split("/") and inside_roots(prefix)
+            and not SHARED.match(os.path.realpath(prefix))
+            and not any(part.startswith(".") and GLOB_ONLY.search(part) for part in rest.split("/"))):
+        return None
+    return f"{cmd} target '{target}' uses a glob outside a session or scratch folder"
+
+
+def check_plain(cmd: str, target: str, cwd: str | None) -> str | None:
+    """A plain rm/rmdir/mv target must resolve strictly below a scratch root, outside the shared tree."""
+    if UNSAFE.search(target):
+        return f"{cmd} target '{target}' uses shell expansion or a glob"
+    if not os.path.isabs(target):
+        if cwd is None or ".." in target.split("/"):
+            return f"{cmd} target '{target}' is relative and the working directory is not certain"
+        # Reason: a relative target is judged where it will land: the session cwd plus any literal cd before it.
+        target = os.path.join(cwd, target)
+    if ".." in target.split("/"):
+        return f"{cmd} target '{target}' contains '..'"
+    if not inside_roots(target):
+        return f"{cmd} target '{target}' resolves outside {', '.join(ROOTS)}"
+    if SHARED.match(os.path.realpath(target)):
+        return f"{cmd} target '{target}' is a shared session scratch directory"
+    return None
+
+
+def check_target(cmd: str, target: str, cwd: str | None) -> str | None:
+    """Route one target to the rule for its kind."""
+    if cmd == "mkdir":
+        return check_mkdir(target)
+    if cmd in ("rm", "rmdir") and os.path.basename(target.rstrip("/")) in CACHE_NAMES:
+        return check_cache(cmd, target, cwd)
+    if GLOB_ONLY.search(target) and not re.search(r"[$`~{}()<>]", target) and cmd != "mv":
+        return check_glob(cmd, target)
+    return check_plain(cmd, target, cwd)
+
+
+def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str | None = None) -> str | None:
+    """Return a reason when this rm/rmdir/mkdir/mv touches something outside ROOTS, else None."""
+    cmd, operands, via_xargs, saw_wrapper = command_word(words)
+    if cmd not in COMMANDS:
+        # Reason: wrapper options that take a value ("timeout -s KILL rm", "env -u X rm") shift the command word;
+        # if a guarded name still follows a wrapper, the parse is not certain, so ask.
+        if saw_wrapper and any(os.path.basename(w) in COMMANDS for w in words):
+            return "a wrapper with options precedes a guarded command and could not be parsed with certainty"
+        return None
+    if via_xargs:
+        return f"{cmd} takes its targets from xargs input"
+    targets, reason = collect_targets(cmd, operands, env or {})
+    if reason:
+        return reason
+    for target in targets:
+        reason = check_target(cmd, target, cwd)
+        if reason:
+            return reason
+    return None
+
+
+def makes_symlink(words: list[str]) -> bool:
+    """True for ln, or cp with -s/--symbolic-link."""
+    names = {os.path.basename(w) for w in words}
+    if "ln" in names:
+        return True
+    return "cp" in names and any(w in ("-s", "--symbolic-link") or re.match(r"^-[a-zA-Z]*s", w) for w in words)
+
+
+MKTEMP = re.compile(r"\b([A-Za-z_]\w*)=\$\(mktemp((?:\s+[^\s()$`;&|]+)*)\s*\)")
+
+
+def mktemp_locations(command: str) -> dict[str, str]:
+    """Map NAME to a placeholder path for NAME=$(mktemp ...) when the new path is certain to land inside a root.
+
+    Reason: "d=$(mktemp -d /home/vscode/wt/case.XXXX); ...; rm -rf $d" is a common test-harness idiom. mktemp
+    creates the path inside the template's directory (or -p DIR, or $TMPDIR/tmp), so its parent is known.
+    """
+    found: dict[str, str] = {}
+    for name, args in MKTEMP.findall(command):
+        words, parent, template = args.split(), None, None
+        for i, word in enumerate(words):
+            if word in ("-p", "--tmpdir") and i + 1 < len(words):
+                parent = words[i + 1]
+            elif not word.startswith("-") and (i == 0 or words[i - 1] not in ("-p", "--tmpdir")):
+                template = word
+        if template and "/" in template:
+            parent = os.path.dirname(template) if parent is None or os.path.isabs(template) else parent
+        parent = parent or os.environ.get("TMPDIR", "/tmp")  # nosec B108 - mktemp's own default
+        if os.path.isabs(parent) and ".." not in parent.split("/") and "TMPDIR=" not in command:
+            found[name] = os.path.join(parent, "mktemp-placeholder")
+    return found
+
+
+def segment_reasons(parsed: list[list[str]], command: str, cwd: str | None) -> list[str]:
+    """Walk the segments in order, tracking literal assignments, cd and symlink creation; collect ask reasons."""
+    env: dict[str, str] = {}
+    mktemps = mktemp_locations(command)
+    reasons = []
+    subshells = bool(any(w.startswith("(") for words in parsed for w in words)
+                     or re.search(r"\b(pushd|popd)\b", command))
+    symlinked = False
+    for words in parsed:
+        # Reason: a mktemp result is known only from its assignment on; "rm -rf $d; d=$(mktemp)" must still ask.
+        env.update({n: loc for n, loc in mktemps.items() if any(w.startswith(f"{n}=$(mktemp") for w in words)})
+        # Reason: "D=/tmp/x; mkdir -p $D" is a common agent idiom; literal assignments are resolved, not guessed.
+        if record_assignments(words, env):
+            continue
+        if words[0].lstrip("({") == "cd":
+            cwd = track_cd([w.lstrip("({") for w in words], cwd, env, subshells)
+            continue
+        # Reason: a symlink made earlier in the same command does not exist yet when realpath runs.
+        if makes_symlink(words):
+            symlinked = True
+        elif symlinked and any(os.path.basename(w) in ("rm", "rmdir") for w in words):
+            reasons.append("a symlink is created earlier in the same command")
+            continue
+        reason = outside_target(words, env, cwd)
+        if reason:
+            reasons.append(reason)
+    return reasons
 
 
 def main() -> None:
@@ -255,29 +360,8 @@ def main() -> None:
         lines = (part.strip() for part in SEPARATORS.split(command))
         reasons = ["command could not be parsed"] if any(CMD_AT_START.match(p) for p in lines) else []
     else:
-        env: dict[str, str] = {}
-        reasons = []
-        cwd = data.get("cwd") if isinstance(data.get("cwd"), str) and os.path.isabs(data.get("cwd")) else None
-        subshells = any(w.startswith("(") for words in parsed for w in words) or re.search(r"\b(pushd|popd)\b", command)
-        symlinked = False
-        for words in parsed:
-            # Reason: "D=/tmp/x; mkdir -p $D" is a common agent idiom; literal assignments are resolved, not guessed.
-            if record_assignments(words, env):
-                continue
-            if words[0].lstrip("({") == "cd":
-                cwd = track_cd([w.lstrip("({") for w in words], cwd, env, bool(subshells))
-                continue
-            # Reason: a symlink made earlier in the same command does not exist yet when realpath runs.
-            if any(os.path.basename(w) == "ln" for w in words) or (
-                    any(os.path.basename(w) == "cp" for w in words) and any(w in ("-s", "--symbolic-link") or
-                                                                            re.match(r"^-[a-zA-Z]*s", w) for w in words)):
-                symlinked = True
-            elif symlinked and any(os.path.basename(w) in ("rm", "rmdir") for w in words):
-                reasons.append("a symlink is created earlier in the same command")
-                continue
-            reason = outside_target(words, env, cwd)
-            if reason:
-                reasons.append(reason)
+        cwd = data.get("cwd")
+        reasons = segment_reasons(parsed, command, cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None)
     if reasons:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
