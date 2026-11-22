@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$WORKSPACES/.claude-archive`), checks it against the originals (content, file count, idle
   again) and only then deletes them. Lossless; subagent JSONL compresses about 5x. `--dry-run`
   previews.
+- `scripts/disk-cleanup.sh archive --transcripts`: also compresses the main transcript of each
+  session idle for 24h whose Claude process has exited, to a private `.jsonl.zst` under `$ARCHIVE_DIR/transcripts/<project>/`, deleting the
+  original only after the archive decompresses byte-identical to it and the file is unchanged.
+  Opt-in, because Claude Code cannot list or resume such a session until it is restored
+  (`zstd -d <archive> -o <projects>/<project>/<id>.jsonl`).
+- `scripts/disk-cleanup.sh 1`: accepted as an explicit Tier 1 run (it was rejected as an unknown
+  argument; Tier 1 is still the default).
 - `scripts/disk-cleanup.sh home`: read-only list of directories of 100MB or more under HOME, three
   levels deep, with their last write, so unused tool installs show up. Claude's dirs and the
   scanned tree are left out.
@@ -74,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `scripts/disk-cleanup.sh` Tier 1: an installed Claude CLI version still in use is no longer
+  deleted. The running check matched the version's path against command lines, which only read
+  `claude`, `claude --resume` or `claude --continue`; it now reads each process's executable.
 - `scripts/disk-cleanup.sh`: Claude paths (session transcripts, CLI downloads) now come from
   Claude Code's own config dir, `$CLAUDE_CONFIG_DIR` or `~/.claude`, instead of a fixed path
   under the scanned tree. The `sessions` title now reads `last N Claude sessions (<dir>)`.
