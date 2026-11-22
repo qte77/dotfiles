@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.claude/hooks/rm-guard.py` (PreToolUse, Bash, fails closed): `rm`/`rmdir` run without a prompt only inside the scratch roots `/tmp`, `/home/vscode/wt` and `/home/vscode/cdpb`, `mkdir` also inside `/workspaces`, `rm -rf` of tool caches anywhere; everything else asks. Policy in `.claude/hooks/rm-guard.md`, regression matrix `bash .claude/hooks/rm-guard-test.sh`; matching allow rules and a `Bash(mv:*)` ask rule in `.claude/settings.json`.
 - CodeQL workflow (`.github/workflows/codeql.yaml`) scanning `python`, `actions` on every
   push, weekly and on demand; actions pinned to full commit SHAs.
 - `.github/workflows/lint-actions.yml`: adopt the shared `qte77/.github` reusable
@@ -60,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Claude Code `.claude/settings.json` sets `BASH_MAX_OUTPUT_LENGTH` to `15000` and
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` to `50` ([env vars](https://code.claude.com/docs/en/env-vars));
+  `.claude/scripts/statusline.sh` is refreshed from claude-code-plugins 60388b9e: it shows context
+  used and the autocompact point, and guards non-numeric input
 - `scripts/disk-cleanup.sh` Tier 2: stripping screenshots from Claude session transcripts is now
   opt-in with `--strip-images` (`all` does not include it), since it is the one step that loses
   session data. Without the flag Tier 2 says what it skipped.
