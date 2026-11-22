@@ -19,8 +19,8 @@ that visibly starts with one of these commands.
 Parser hardening (2026-11-22, from a security review): shell comments are stripped quote-aware (a quoted `#` stays an
 operand), backslash-newline continuations are joined first, operands with control characters ask, a wrapper whose
 options take values (`timeout -s KILL rm`, `env -u X rm`) asks when the command word is uncertain, any `rm`/`rmdir`
-after an `ln` or `cp -s` in the same command asks, and a cache target that is a symlink asks. `NAME=$(mktemp ...)` is judged by where mktemp creates the
-path (template directory, `-p DIR`, or `$TMPDIR`), from the assignment on.
+after an `ln` or `cp -s` in the same command asks, and a cache target that is a symlink asks. A `$(mktemp ...)` result always asks (it is empty when mktemp
+fails, and later rebinding is hard to track). fd redirects (`2>&1`, `>/dev/null`) are removed before parsing.
 
 ## How it is built
 

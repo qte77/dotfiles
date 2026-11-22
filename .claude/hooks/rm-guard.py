@@ -28,6 +28,7 @@ COMMANDS = {"rm", "rmdir", "mkdir", "mv"}
 WRAPPERS = {"command", "builtin", "nice", "nohup", "time", "timeout", "stdbuf", "noglob", "sudo", "env", "xargs"}
 KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!"}
 WRAPPER_ARG = re.compile(r"^[+-]?\d+(\.\d+)?[smhd]?$")
+FD_REDIRECT = re.compile(r"(?<![\w/&|>])(?:\d*>>?&\d+-?|&>>?\s*/dev/null|\d*>>?\s*/dev/null)(?![\w/])")
 NULL_REDIRECT = re.compile(r"^\d*>>?(/dev/null|&\d)$")
 UNSAFE = re.compile(r"[$`~{}()<>*?\[\]]")
 GLOB_ONLY = re.compile(r"[*?\[\]]")
@@ -291,42 +292,14 @@ def makes_symlink(words: list[str]) -> bool:
     return "cp" in names and any(w in ("-s", "--symbolic-link") or re.match(r"^-[a-zA-Z]*s", w) for w in words)
 
 
-MKTEMP = re.compile(r"\b([A-Za-z_]\w*)=\$\(mktemp((?:\s+[^\s()$`;&|]+)*)\s*\)")
-
-
-def mktemp_locations(command: str) -> dict[str, str]:
-    """Map NAME to a placeholder path for NAME=$(mktemp ...) when the new path is certain to land inside a root.
-
-    Reason: "d=$(mktemp -d /home/vscode/wt/case.XXXX); ...; rm -rf $d" is a common test-harness idiom. mktemp
-    creates the path inside the template's directory (or -p DIR, or $TMPDIR/tmp), so its parent is known.
-    """
-    found: dict[str, str] = {}
-    for name, args in MKTEMP.findall(command):
-        words, parent, template = args.split(), None, None
-        for i, word in enumerate(words):
-            if word in ("-p", "--tmpdir") and i + 1 < len(words):
-                parent = words[i + 1]
-            elif not word.startswith("-") and (i == 0 or words[i - 1] not in ("-p", "--tmpdir")):
-                template = word
-        if template and "/" in template:
-            parent = os.path.dirname(template) if parent is None or os.path.isabs(template) else parent
-        parent = parent or os.environ.get("TMPDIR", "/tmp")  # nosec B108 - mktemp's own default
-        if os.path.isabs(parent) and ".." not in parent.split("/") and "TMPDIR=" not in command:
-            found[name] = os.path.join(parent, "mktemp-placeholder")
-    return found
-
-
 def segment_reasons(parsed: list[list[str]], command: str, cwd: str | None) -> list[str]:
     """Walk the segments in order, tracking literal assignments, cd and symlink creation; collect ask reasons."""
     env: dict[str, str] = {}
-    mktemps = mktemp_locations(command)
     reasons = []
     subshells = bool(any(w.startswith("(") for words in parsed for w in words)
                      or re.search(r"\b(pushd|popd)\b", command))
     symlinked = False
     for words in parsed:
-        # Reason: a mktemp result is known only from its assignment on; "rm -rf $d; d=$(mktemp)" must still ask.
-        env.update({n: loc for n, loc in mktemps.items() if any(w.startswith(f"{n}=$(mktemp") for w in words)})
         # Reason: "D=/tmp/x; mkdir -p $D" is a common agent idiom; literal assignments are resolved, not guessed.
         if record_assignments(words, env):
             continue
@@ -353,6 +326,9 @@ def main() -> None:
     command = strip_heredocs(command)
     # Reason: bash joins backslash-newline continuations before splitting words; do the same.
     command = strip_comments(command.replace("\\\n", ""))
+    # Reason: shlex splits "2>&1" on '&' into a fake operator and operand; fd duplications and /dev/null
+    # redirects never name a target, so remove them before lexing.
+    command = FD_REDIRECT.sub(" ", command)
     parsed = segments(command)
     if parsed is None:
         # Reason: only an unparseable command that visibly starts a guarded segment is suspicious;

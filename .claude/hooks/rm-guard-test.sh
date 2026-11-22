@@ -132,16 +132,17 @@ mkdir -p /tmp/rmg-sym && ln -sfn /workspaces /tmp/rmg-sym/node_modules
 check ask 'rm -rf node_modules/' /tmp/rmg-sym
 rm -f /tmp/rmg-sym/node_modules && rmdir /tmp/rmg-sym
 check pass 'timeout 30 rm -rf /tmp/x/y'
-# --- mktemp results are judged by where mktemp creates them
-check pass 't(){ d=$(mktemp -d /home/vscode/wt/mdcase.XXXX); (cd $d; true); rm -rf $d; }; t'
-check pass 'd=$(mktemp -d); rm -rf "$d"'
-check pass 'd=$(mktemp -d -p /home/vscode/cdpb); rm -rf $d/sub'
-check ask 'd=$(mktemp -d /workspaces/qte77/x.XXXX); rm -rf $d'
-check ask 'd=$(mktemp -d -p /workspaces); rm -rf $d'
-check ask 'd=$(mktemp -d /home/vscode/wt/x.XXXX); d=/workspaces/q; rm -rf $d'
-check ask 'TMPDIR=/workspaces d=$(mktemp -d); rm -rf $d'
-check ask 'd=$(mktemp -d /tmp/../workspaces/x.XXXX); rm -rf $d'
-check ask 'd=$(mktemp -d "$X"); rm -rf $d'
-check ask 'rm -rf $d; d=$(mktemp -d)'
+# --- mktemp results are never trusted (empty on failure, rebinding): they ask
+check ask 't(){ d=$(mktemp -d /home/vscode/wt/mdcase.XXXX); (cd $d; true); rm -rf $d; }; t'
+check ask 'd=$(mktemp -d); rm -rf $d/*'
+check ask 'd=$(mktemp -d /home/vscode/wt/x.XXXX); export d=/workspaces/q; rm -rf $d'
+# --- fd redirects are not targets
+check pass 'cd /workspaces/qte77; rm -r x/__pycache__ 2>&1 | head -2'
+check pass 'rm -rf /tmp/x/y 2>&1 >/dev/null'
+check pass 'rm -rf /tmp/x/y &>/dev/null'
+check pass 'rm -rf /tmp/x/y 2>/dev/null; echo done'
+check ask 'rm -rf /tmp/x/y 2>&1 /workspaces/q'
+check ask 'rm -rf /tmp/x 2>/dev/null /workspaces/q'
+check ask 'rm -rf /tmp/x >/workspaces/q'
 [ "$fail" -eq 0 ] && echo "rm-guard: all cases OK"
 exit "$fail"
