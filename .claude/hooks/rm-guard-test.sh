@@ -113,5 +113,24 @@ check ask "rm -f ../x" /tmp/rmg-test/work
 check ask "cd; rm -f x" /tmp/rmg-test
 check pass "D=/tmp/rmg-test; cd \$D; rm -f work/a" /workspaces/qte77
 rmdir /tmp/rmg-test/work /tmp/rmg-test
+# --- parser hardening (2026-11-22 security review findings)
+check ask 'rm -rf /tmp/x "#" /workspaces/q'
+check ask "rm -rf /tmp/x '#' /workspaces/q"
+check ask 'rm -rf /tmp/a#b /workspaces/q'
+check pass 'rm -rf /tmp/x # /workspaces/q is only a comment'
+check pass 'echo "a # b"; rm -rf /tmp/x'
+check ask "rm -rf /tmp/x # c${nl}rm -rf /workspaces/q"
+check ask "rm -rf /tmp/x \\${nl}/workspaces/q" /tmp
+check ask 'timeout -s KILL 5 rm -rf /workspaces/q'
+check ask 'timeout -k 5 10 rm -rf /workspaces/q'
+check ask 'env -u FOO rm -rf /workspaces/q'
+check ask 'env -C /tmp rm -rf /workspaces/q'
+check ask 'ln -s /workspaces/q /tmp/l; rm -rf /tmp/l/'
+check ask 'ln -s /workspaces/q /tmp/x/l && rm -rf /tmp/x/l/*'
+check ask 'cp -s /workspaces/q /tmp/l; rm -rf /tmp/l'
+mkdir -p /tmp/rmg-sym && ln -sfn /workspaces /tmp/rmg-sym/node_modules
+check ask 'rm -rf node_modules/' /tmp/rmg-sym
+rm -f /tmp/rmg-sym/node_modules && rmdir /tmp/rmg-sym
+check pass 'timeout 30 rm -rf /tmp/x/y'
 [ "$fail" -eq 0 ] && echo "rm-guard: all cases OK"
 exit "$fail"

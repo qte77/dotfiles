@@ -62,6 +62,34 @@ def strip_heredocs(command: str) -> str:
     return HEREDOC.sub(keep_or_drop, command)
 
 
+def strip_comments(command: str) -> str:
+    """Drop shell comments: an unquoted '#' at the start of a word up to the newline (bash semantics).
+
+    Reason: shlex cannot tell a quoted "#" operand from a comment, and a quoted '#' must stay an operand.
+    """
+    out, quote, i, n = [], "", 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1]); i += 2; continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2]); i += 2; continue
+        elif ch in "'\"":
+            quote = ch; out.append(ch)
+        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def segments(command: str) -> list[list[str]] | None:
     """Split into command word lists on shell operators, respecting quotes; None when unparseable."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
@@ -122,7 +150,8 @@ def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str
     """Return a reason when this rm/rmdir/mkdir/mv touches something outside ROOTS, else None."""
     env = env or {}
     words = list(words)
-    via_xargs = False
+    all_words = list(words)
+    via_xargs = saw_wrapper = False
     while words:
         word = words[0].lstrip("({")
         if word and not (word in WRAPPERS or word in KEYWORDS or "=" in word
@@ -130,16 +159,21 @@ def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str
             words[0] = word
             break
         via_xargs = via_xargs or word == "xargs"
+        saw_wrapper = saw_wrapper or word in WRAPPERS
         words.pop(0)
     cmd = os.path.basename(words[0]) if words else ""
     if cmd not in COMMANDS:
+        # Reason: wrapper options that take a value ("timeout -s KILL rm", "env -u X rm") shift the command word;
+        # if a guarded name still follows a wrapper, the parse is not certain, so ask.
+        if saw_wrapper and any(os.path.basename(w) in COMMANDS for w in all_words):
+            return "a wrapper with options precedes a guarded command and could not be parsed with certainty"
         return None
     if via_xargs:
         return f"{cmd} takes its targets from xargs input"
     targets, options_done = [], False
     for word in words[1:]:
-        if word == "#":
-            break
+        if any(ord(c) < 32 for c in word):
+            return f"{cmd} operand contains a control character"
         if NULL_REDIRECT.match(word):
             continue
         if not options_done and word == "--":
@@ -174,6 +208,9 @@ def outside_target(words: list[str], env: dict[str, str] | None = None, cwd: str
                 return f"{cmd} cache target '{target}' uses expansion, a glob or '..'"
             if os.path.isabs(target) and not inside_roots(target, CREATE_ROOTS):
                 return f"{cmd} cache target '{target}' is outside {', '.join(CREATE_ROOTS)}"
+            # Reason: "rm -rf node_modules/" through a symlink deletes the link's target tree.
+            if os.path.islink(os.path.join(cwd or os.getcwd(), target).rstrip("/")):
+                return f"{cmd} cache target '{target}' is a symlink"
             continue
         if GLOB_ONLY.search(target) and not re.search(r"[$`~{}()<>]", target) and cmd != "mv":
             # Reason: "rm $S/*.md" in a session scratchpad is routine; a glob cannot climb above its literal prefix,
@@ -209,6 +246,8 @@ def main() -> None:
     if not re.search(r"\b(rm|rmdir|mkdir|mv)\b", command):
         return
     command = strip_heredocs(command)
+    # Reason: bash joins backslash-newline continuations before splitting words; do the same.
+    command = strip_comments(command.replace("\\\n", ""))
     parsed = segments(command)
     if parsed is None:
         # Reason: only an unparseable command that visibly starts a guarded segment is suspicious;
@@ -220,12 +259,21 @@ def main() -> None:
         reasons = []
         cwd = data.get("cwd") if isinstance(data.get("cwd"), str) and os.path.isabs(data.get("cwd")) else None
         subshells = any(w.startswith("(") for words in parsed for w in words) or re.search(r"\b(pushd|popd)\b", command)
+        symlinked = False
         for words in parsed:
             # Reason: "D=/tmp/x; mkdir -p $D" is a common agent idiom; literal assignments are resolved, not guessed.
             if record_assignments(words, env):
                 continue
             if words[0].lstrip("({") == "cd":
                 cwd = track_cd([w.lstrip("({") for w in words], cwd, env, bool(subshells))
+                continue
+            # Reason: a symlink made earlier in the same command does not exist yet when realpath runs.
+            if any(os.path.basename(w) == "ln" for w in words) or (
+                    any(os.path.basename(w) == "cp" for w in words) and any(w in ("-s", "--symbolic-link") or
+                                                                            re.match(r"^-[a-zA-Z]*s", w) for w in words)):
+                symlinked = True
+            elif symlinked and any(os.path.basename(w) in ("rm", "rmdir") for w in words):
+                reasons.append("a symlink is created earlier in the same command")
                 continue
             reason = outside_target(words, env, cwd)
             if reason:

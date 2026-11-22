@@ -16,6 +16,11 @@ Owner policy (2026-11-22). Lives in the user-level Claude Code config (`~/.claud
 Also always a prompt: `~`, backticks, unresolved `$VAR`, `..`, globs outside a folder strictly below a scratch root (e.g. `rm $S/*.md` in a session scratchpad passes; `/tmp/*`, `~/wt/*`, `.*` and globs in repos ask) in a target, `xargs rm`, and an unparseable command
 that visibly starts with one of these commands.
 
+Parser hardening (2026-11-22, from a security review): shell comments are stripped quote-aware (a quoted `#` stays an
+operand), backslash-newline continuations are joined first, operands with control characters ask, a wrapper whose
+options take values (`timeout -s KILL rm`, `env -u X rm`) asks when the command word is uncertain, any `rm`/`rmdir`
+after an `ln` or `cp -s` in the same command asks, and a cache target that is a symlink asks.
+
 ## How it is built
 
 1. **Allow rules** in `~/.claude/settings.json`: `rm`, `rm -f`, `rm -r`, `rm -rf`, `rmdir` per scratch root, and
