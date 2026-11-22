@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.claude/hooks/rm-guard.py` (PreToolUse, Bash, fails closed): `rm`/`rmdir` run without a prompt only inside the scratch roots `/tmp`, `/home/vscode/wt` and `/home/vscode/cdpb`, `mkdir` also inside `/workspaces`, `rm -rf` of tool caches anywhere; everything else asks. Policy in `.claude/hooks/rm-guard.md`, regression matrix `bash .claude/hooks/rm-guard-test.sh`; matching allow rules and a `Bash(mv:*)` ask rule in `.claude/settings.json`.
 - CodeQL workflow (`.github/workflows/codeql.yaml`) scanning `python`, `actions` on every
   push, weekly and on demand; actions pinned to full commit SHAs.
 - `.github/workflows/lint-actions.yml`: adopt the shared `qte77/.github` reusable
