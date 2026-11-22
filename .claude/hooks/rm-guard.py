@@ -227,9 +227,16 @@ def check_glob(cmd: str, target: str) -> str | None:
     literal = target[:GLOB_ONLY.search(target).start()]
     prefix = os.path.dirname(literal) if not literal.endswith("/") else literal.rstrip("/")
     rest = target[len(prefix):]
-    if (os.path.isabs(prefix) and ".." not in target.split("/") and inside_roots(prefix)
-            and not SHARED.match(os.path.realpath(prefix))
-            and not any(part.startswith(".") and GLOB_ONLY.search(part) for part in rest.split("/"))):
+    safe_parts = ".." not in target.split("/") and not any(
+        part.startswith(".") and GLOB_ONLY.search(part) for part in rest.split("/"))
+    if (os.path.isabs(prefix) and safe_parts and inside_roots(prefix)
+            and not SHARED.match(os.path.realpath(prefix))):
+        return None
+    # Reason: "rm -rf /tmp/mdcase.*" names its own files; a glob directly in a root passes only with a literal
+    # name stem of 2+ characters that cannot reach the shared session tree (claude-*) or other dot entries.
+    stem = literal[len(prefix) + 1:] if literal.startswith(prefix + "/") else ""
+    if (os.path.realpath(prefix) in ROOTS and safe_parts and "/" not in stem and len(stem) >= 2
+            and not stem.startswith((".", "claude"))):
         return None
     return f"{cmd} target '{target}' uses a glob outside a session or scratch folder"
 

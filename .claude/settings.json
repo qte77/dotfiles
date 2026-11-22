@@ -15,7 +15,7 @@
           {
             "type": "command",
             "command": "python3 -I /home/vscode/.claude/hooks/rm-guard.py",
-            "timeout": 10,
+            "timeout": 30,
             "onFailure": "block"
           }
         ]

@@ -144,5 +144,16 @@ check pass 'rm -rf /tmp/x/y 2>/dev/null; echo done'
 check ask 'rm -rf /tmp/x/y 2>&1 /workspaces/q'
 check ask 'rm -rf /tmp/x 2>/dev/null /workspaces/q'
 check ask 'rm -rf /tmp/x >/workspaces/q'
+# --- globs directly in a root need a literal name stem (never the shared claude-* tree)
+check pass 'rm -rf /tmp/mdcase.*'
+check pass 'rm -f /tmp/bats3*.out'
+check pass 'rm -rf /home/vscode/wt/mdcase.*'
+check pass 'rm -rf /home/vscode/cdpb/loop-*.log'
+check ask 'rm -rf /tmp/*'
+check ask 'rm -rf /tmp/c*'
+check ask 'rm -rf /tmp/claude*'
+check ask 'rm -rf /tmp/.X*'
+check ask 'rm -rf /tmp/x*/../../workspaces'
+check ask 'rm -rf /home/vscode/wt/*'
 [ "$fail" -eq 0 ] && echo "rm-guard: all cases OK"
 exit "$fail"
