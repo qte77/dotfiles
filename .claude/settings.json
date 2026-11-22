@@ -11,6 +11,12 @@
           {
             "type": "command",
             "command": "/home/vscode/.claude/hooks/rtk-rewrite.sh"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I /home/vscode/.claude/hooks/rm-guard.py",
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       }
@@ -26,5 +32,34 @@
     "docs-governance@qte77-claude-code-utils": true,
     "codebase-tools@qte77-claude-code-utils": true,
     "workspace-sandbox@qte77-claude-code-utils": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(mkdir *)",
+      "Bash(rm -f /home/vscode/cdpb/*)",
+      "Bash(rm -f /home/vscode/wt/*)",
+      "Bash(rm -f /tmp/*)",
+      "Bash(rm -r /home/vscode/cdpb/*)",
+      "Bash(rm -r /home/vscode/wt/*)",
+      "Bash(rm -r /tmp/*)",
+      "Bash(rm -rf *.mypy_cache)",
+      "Bash(rm -rf *.pytest_cache)",
+      "Bash(rm -rf *.ruff_cache)",
+      "Bash(rm -rf *__pycache__)",
+      "Bash(rm -rf *__pycache__/)",
+      "Bash(rm -rf *node_modules)",
+      "Bash(rm -rf /home/vscode/cdpb/*)",
+      "Bash(rm -rf /home/vscode/wt/*)",
+      "Bash(rm -rf /tmp/*)",
+      "Bash(rm /home/vscode/cdpb/*)",
+      "Bash(rm /home/vscode/wt/*)",
+      "Bash(rm /tmp/*)",
+      "Bash(rmdir /home/vscode/cdpb/*)",
+      "Bash(rmdir /home/vscode/wt/*)",
+      "Bash(rmdir /tmp/*)"
+    ],
+    "ask": [
+      "Bash(mv:*)"
+    ]
   }
 }
